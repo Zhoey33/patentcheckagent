@@ -32,6 +32,21 @@ docker compose up --build
 - 前端：http://localhost:3000
 - 后端：http://localhost:8000/docs
 
+## 已实现接口
+
+- 认证：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
+- 审查任务：`POST /api/patent-checks`、`GET /api/patent-checks`、`GET /api/patent-checks/{task_id}`、`GET /api/patent-checks/{task_id}/report`、`POST /api/patent-checks/{task_id}/retry`
+- 管理员：`GET /api/admin/users`、`POST /api/admin/users`、`PATCH /api/admin/users/{user_id}`、`POST /api/admin/users/{user_id}/reset-password`、`GET /api/admin/patent-checks`
+
+## 本地验证
+
+```bash
+.venv/bin/python -m pytest backend/tests -q
+.venv/bin/python -m ruff check backend/app backend/tests backend/alembic
+cd frontend && npm run build
+docker compose config
+```
+
 ## 文档
 
 - 产品需求：[docs/PRD.md](docs/PRD.md)

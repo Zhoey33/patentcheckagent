@@ -31,3 +31,11 @@ def get_current_user(
     if user is None or not user.is_active:
         raise UserFacingError("登录状态已失效，请重新登录。", status_code=401)
     return user
+
+
+def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Require the current user to be an active administrator."""
+
+    if current_user.role != "admin":
+        raise UserFacingError("无权访问管理员接口。", status_code=403)
+    return current_user

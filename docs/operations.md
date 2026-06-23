@@ -22,11 +22,23 @@ curl http://localhost:8000/api/health
 
 ## 账号维护
 
-第一版不提供管理员页面，账号由种子脚本维护。修改 `.env` 中的 `SEED_*` 变量后运行：
+第一版不提供管理员页面，账号可以通过种子脚本或管理员 API 维护。修改 `.env` 中的 `SEED_*` 变量后运行：
 
 ```bash
 docker compose run --rm backend python -m app.scripts.seed_users
 ```
+
+管理员 API：
+
+```text
+GET  /api/admin/users
+POST /api/admin/users
+PATCH /api/admin/users/{user_id}
+POST /api/admin/users/{user_id}/reset-password
+GET  /api/admin/patent-checks
+```
+
+这些接口需要管理员账号登录态。普通用户访问会返回 `403`。
 
 ## 模型调用失败
 

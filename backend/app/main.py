@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.patent_checks import router as patent_checks_router
 from app.core.config import get_settings
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(patent_checks_router)
+    app.include_router(admin_router)
     return app
 
 
