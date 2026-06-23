@@ -41,7 +41,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-首次启动会通过 `backend` 服务执行种子脚本，创建 1 个管理员账号和 2 个普通账号。账号和密码来自 `.env` 中的 `SEED_*` 变量。
+首次启动会通过 `backend` 服务先执行 `alembic upgrade head` 初始化或升级数据库结构，再执行种子脚本创建 1 个管理员账号和 2 个普通账号。账号和密码来自 `.env` 中的 `SEED_*` 变量。
 
 ## 5. 配置 HTTPS
 
@@ -63,4 +63,8 @@ git pull
 docker compose up -d --build
 ```
 
-升级前建议备份 PostgreSQL 数据卷或执行数据库备份。
+升级前建议备份 PostgreSQL 数据卷或执行数据库备份。服务启动时会自动执行 Alembic 迁移；如果需要手动迁移，可执行：
+
+```bash
+docker compose run --rm backend alembic upgrade head
+```

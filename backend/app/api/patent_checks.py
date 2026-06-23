@@ -9,6 +9,7 @@ from app.deps import get_current_user
 from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
 from app.schemas.patent_check import PatentCheckReportRead, PatentCheckTaskList, PatentCheckTaskRead
+from app.services.errors import UserFacingError
 from app.services.patent_check_service import (
     create_patent_check_task,
     enqueue_patent_check,
@@ -103,6 +104,8 @@ def retry_task(
     task = get_task_for_user(db, task_id, current_user)
     if task.status != "failed":
         return task
+    if not task.process_text_path:
+        raise UserFacingError("任务输入已按安全策略清理，请重新提交文件后发起审查。")
     task.status = "pending"
     task.error_message = None
     db.commit()

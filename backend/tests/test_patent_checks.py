@@ -81,3 +81,26 @@ def test_regular_user_cannot_read_other_users_task(
     response = client.get(f"/api/patent-checks/{task.id}")
 
     assert response.status_code == 404
+
+
+def test_retry_failed_task_requires_available_process_text(
+    client: TestClient, db_session: Session
+) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="已清理的失败任务",
+        status="failed",
+        process_text_path=None,
+        input_cleanup_status="cleaned",
+        error_message="模型调用失败。",
+    )
+    db_session.add(task)
+    db_session.commit()
+    login(client, "alice")
+
+    response = client.post(f"/api/patent-checks/{task.id}/retry")
+
+    assert response.status_code == 400
+    assert "重新提交文件" in response.json()["detail"]
