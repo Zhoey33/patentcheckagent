@@ -4,7 +4,7 @@
 
 仓库代号：`patentcheckagent`
 
-面向实验室内部使用的专利申请文件智能审查系统。系统支持固定账号登录、PDF 文件上传、文本抽取、异步调用 GPT-5.5 审查模板、Markdown 报告展示与历史记录查询。
+面向实验室内部使用的专利申请文件智能审查系统。系统支持固定账号登录、PDF/Word 文件上传、文本抽取、异步调用 GPT-5.5 审查模板、Markdown 报告展示与历史记录查询。
 
 ## 技术栈
 
@@ -39,6 +39,12 @@ docker compose up --build
 - 认证：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
 - 审查任务：`POST /api/patent-checks`、`GET /api/patent-checks`、`GET /api/patent-checks/{task_id}`、`GET /api/patent-checks/{task_id}/report`、`POST /api/patent-checks/{task_id}/retry`
 - 管理员：`GET /api/admin/users`、`POST /api/admin/users`、`PATCH /api/admin/users/{user_id}`、`POST /api/admin/users/{user_id}/reset-password`、`GET /api/admin/patent-checks`
+
+## 上传规则
+
+- 权利要求书文件、说明书文件为必填。
+- 附图说明文件、摘要文件为可选。
+- 支持可复制文本型 PDF 和 Word（`.docx`）文件；扫描件 PDF 暂不支持 OCR。
 
 ## 本地验证
 

@@ -26,13 +26,13 @@ def create_task(
     technical_field: str | None = Form(default=None),
     claims: UploadFile = File(...),
     specification: UploadFile = File(...),
-    drawings: UploadFile = File(...),
+    drawings: UploadFile | None = File(default=None),
     abstract: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
 ) -> PatentCheckTask:
-    """Create an asynchronous patent check task from uploaded PDF files."""
+    """Create an asynchronous patent check task from uploaded PDF or Word files."""
 
     return create_patent_check_task(
         db=db,

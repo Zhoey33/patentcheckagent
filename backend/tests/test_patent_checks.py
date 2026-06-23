@@ -20,6 +20,14 @@ def pdf_file(name: str) -> tuple[str, bytes, str]:
     return (name, b"%PDF-1.4 fake content", "application/pdf")
 
 
+def docx_file(name: str) -> tuple[str, bytes, str]:
+    return (
+        name,
+        b"fake docx content",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+
 def test_create_task_requires_login(client: TestClient) -> None:
     response = client.get("/api/patent-checks")
 
@@ -40,12 +48,12 @@ def test_create_task_rejects_non_pdf(client: TestClient) -> None:
     )
 
     assert response.status_code == 400
-    assert "仅支持 PDF" in response.json()["detail"]
+    assert "PDF 或 Word" in response.json()["detail"]
 
 
 def test_create_task_saves_metadata(monkeypatch, client: TestClient) -> None:
     monkeypatch.setattr(
-        "app.services.patent_check_service.extract_pdf_text",
+        "app.services.patent_check_service.extract_document_text",
         lambda path: f"抽取文本 {path.name}",
     )
     login(client)
@@ -66,6 +74,51 @@ def test_create_task_saves_metadata(monkeypatch, client: TestClient) -> None:
     assert payload["technical_field"] == "人工智能"
     assert payload["status"] == "pending"
     assert len(payload["files"]) == 3
+
+
+def test_create_task_accepts_docx_uploads(monkeypatch, client: TestClient) -> None:
+    monkeypatch.setattr(
+        "app.services.patent_check_service.extract_document_text",
+        lambda path: f"抽取文本 {path.name}",
+    )
+    login(client)
+
+    response = client.post(
+        "/api/patent-checks",
+        data={"title": "Word 格式任务"},
+        files={
+            "claims": docx_file("claims.docx"),
+            "specification": docx_file("specification.docx"),
+            "drawings": docx_file("drawings.docx"),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["title"] == "Word 格式任务"
+    assert len(payload["files"]) == 3
+
+
+def test_create_task_treats_drawings_as_optional(monkeypatch, client: TestClient) -> None:
+    monkeypatch.setattr(
+        "app.services.patent_check_service.extract_document_text",
+        lambda path: f"抽取文本 {path.name}",
+    )
+    login(client)
+
+    response = client.post(
+        "/api/patent-checks",
+        data={"title": "无附图说明任务"},
+        files={
+            "claims": pdf_file("claims.pdf"),
+            "specification": pdf_file("specification.pdf"),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["drawings_text_length"] == 0
+    assert len(payload["files"]) == 2
 
 
 def test_regular_user_cannot_read_other_users_task(

@@ -14,8 +14,12 @@ from app.core.config import Settings
 from app.models.patent_check_file import PatentCheckFile
 from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
+from app.services.document_extractor import (
+    SUPPORTED_FORMAT_LABEL,
+    SUPPORTED_SUFFIXES,
+    extract_document_text,
+)
 from app.services.errors import UserFacingError
-from app.services.pdf_extractor import extract_pdf_text
 
 FILE_ROLES = {
     "claims": "权利要求书文件",
@@ -25,12 +29,14 @@ FILE_ROLES = {
 }
 
 
-def ensure_pdf_upload(file: UploadFile, settings: Settings) -> bytes:
+def ensure_supported_upload(file: UploadFile, settings: Settings) -> bytes:
     """Validate an uploaded file and return its content bytes."""
 
     filename = file.filename or ""
-    if not filename.lower().endswith(".pdf"):
-        raise UserFacingError(f"{filename or '上传文件'} 格式不支持，第一版仅支持 PDF。")
+    if Path(filename).suffix.lower() not in SUPPORTED_SUFFIXES:
+        raise UserFacingError(
+            f"{filename or '上传文件'} 格式不支持，请上传 {SUPPORTED_FORMAT_LABEL} 文件。"
+        )
 
     content = file.file.read()
     if len(content) > settings.max_file_size_bytes:
@@ -41,7 +47,7 @@ def ensure_pdf_upload(file: UploadFile, settings: Settings) -> bytes:
 
 
 def save_upload(content: bytes, filename: str, role: str, settings: Settings) -> Path:
-    """Persist an uploaded PDF into the temporary upload directory."""
+    """Persist an uploaded document into the temporary upload directory."""
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     safe_suffix = Path(filename).suffix.lower() or ".pdf"
@@ -69,7 +75,7 @@ def create_patent_check_task(
 ) -> PatentCheckTask:
     """Create a task after validating files and extracting text."""
 
-    required_roles = ("claims", "specification", "drawings")
+    required_roles = ("claims", "specification")
     for role in required_roles:
         if uploads.get(role) is None:
             raise UserFacingError(f"{FILE_ROLES[role]}为必填项。")
@@ -84,10 +90,10 @@ def create_patent_check_task(
     try:
         for role, file in provided.items():
             assert file is not None
-            content = ensure_pdf_upload(file, settings)
+            content = ensure_supported_upload(file, settings)
             stored_path = save_upload(content, file.filename or f"{role}.pdf", role, settings)
             stored_paths.append(stored_path)
-            text = extract_pdf_text(stored_path)
+            text = extract_document_text(stored_path)
             extracted_texts[role] = text
             files.append(
                 PatentCheckFile(

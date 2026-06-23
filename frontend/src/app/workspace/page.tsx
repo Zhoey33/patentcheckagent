@@ -14,7 +14,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 const fileFields = [
   { name: "claims", label: "权利要求书文件", required: true },
   { name: "specification", label: "说明书文件", required: true },
-  { name: "drawings", label: "附图说明文件", required: true },
+  { name: "drawings", label: "附图说明文件", required: false },
   { name: "abstract", label: "摘要文件", required: false }
 ] as const;
 
@@ -50,7 +50,7 @@ export default function WorkspacePage() {
     <AppShell user={user}>
       <div className="mb-5">
         <h1 className="text-2xl font-semibold text-ink">审查工作台</h1>
-        <p className="mt-1 text-sm text-muted">上传可复制文本型 PDF，任务会异步执行，提交后可在详情页查看进度。</p>
+        <p className="mt-1 text-sm text-muted">上传可复制文本型 PDF 或 Word（.docx），任务会异步执行，提交后可在详情页查看进度。</p>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5 rounded border border-line bg-white p-5">
@@ -84,7 +84,7 @@ export default function WorkspacePage() {
               <input
                 name={field.name}
                 type="file"
-                accept="application/pdf,.pdf"
+                accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.docx"
                 required={field.required}
                 className="block w-full text-sm text-muted file:mr-3 file:h-9 file:rounded file:border-0 file:bg-panel file:px-3 file:text-sm file:text-ink"
               />
@@ -93,7 +93,7 @@ export default function WorkspacePage() {
         </div>
 
         <div className="rounded border border-line bg-panel px-3 py-2 text-sm text-muted">
-          单个文件不超过 20 MB，单个任务最多 4 个 PDF，总抽取文本不超过 200,000 个中文字符。扫描件 PDF 暂不支持 OCR。
+          单个文件不超过 20 MB，单个任务最多 4 个文件，支持可复制文本型 PDF 和 Word（.docx），总抽取文本不超过 200,000 个中文字符。扫描件 PDF 暂不支持 OCR。
         </div>
 
         {error ? <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-danger">{error}</div> : null}

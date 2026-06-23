@@ -10,7 +10,7 @@ from app.db.base import Base
 
 
 class PatentCheckFile(Base):
-    """Metadata for a PDF uploaded as part of a patent check task."""
+    """Metadata for a document uploaded as part of a patent check task."""
 
     __tablename__ = "patent_check_files"
 
