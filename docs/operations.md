@@ -51,6 +51,20 @@ GET  /api/admin/patent-checks
 
 日志中不得打印完整 API key 或完整专利文本。
 
+## Docker Hub 拉取超时
+
+如果 `docker compose up --build` 在拉取 `node:22-alpine`、`python:3.12-slim` 等基础镜像时出现 `i/o timeout`，先确认 Docker Desktop 已启动，然后在 `.env` 中临时改用可访问的镜像前缀，例如：
+
+```bash
+PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-alpine
+POSTGRES_IMAGE=docker.m.daocloud.io/library/postgres:16-alpine
+REDIS_IMAGE=docker.m.daocloud.io/library/redis:7-alpine
+NGINX_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
+```
+
+后端 Python 依赖安装已在 Dockerfile 中配置清华 PyPI 源。前端 Docker 构建已配置 npm 镜像源，避免构建阶段再次卡在 npm 下载。
+
 ## 上传与清理
 
 Worker 在任务成功或失败后清理上传原始文件和过程文本，仅保留文件元数据、状态、错误、阶段结果和最终报告。如果任务一直停留在 `pending`，优先检查 Redis 和 Worker 是否正常。
