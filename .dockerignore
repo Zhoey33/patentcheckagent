@@ -1,0 +1,15 @@
+# 这个文件用于减少 Docker 构建上下文并避免把本地密钥复制进镜像。
+
+.git
+.venv
+node_modules
+.next
+uploads
+logs
+.env
+.env.*
+!.env.example
+llm_api.md
+*.sqlite3
+*.db
+.DS_Store

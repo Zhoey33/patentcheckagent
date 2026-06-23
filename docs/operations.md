@@ -1,0 +1,53 @@
+# 这个文件用于记录系统日常运维、排障和安全检查方法。
+
+# 运维手册
+
+## 常用命令
+
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose logs -f worker
+docker compose logs -f frontend
+docker compose logs -f nginx
+```
+
+## 健康检查
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+返回 `{"status":"ok"}` 表示后端进程可访问。
+
+## 账号维护
+
+第一版不提供管理员页面，账号由种子脚本维护。修改 `.env` 中的 `SEED_*` 变量后运行：
+
+```bash
+docker compose run --rm backend python -m app.scripts.seed_users
+```
+
+## 模型调用失败
+
+排查顺序：
+
+1. 确认 `.env` 中 `GPT_API_KEY` 已配置。
+2. 确认 ECS 可以访问 `GPT_BASE_URL`。
+3. 查看 `worker` 日志。
+4. 查看任务详情中的失败原因。
+
+日志中不得打印完整 API key 或完整专利文本。
+
+## 上传与清理
+
+Worker 在任务成功或失败后清理上传原始文件和过程文本，仅保留文件元数据、状态、错误、阶段结果和最终报告。如果任务一直停留在 `pending`，优先检查 Redis 和 Worker 是否正常。
+
+## 上线前安全清单
+
+- `.env` 未提交 Git。
+- `llm_api.md` 未提交 Git。
+- 生产 `APP_SECRET_KEY` 不使用默认值。
+- PostgreSQL 密码已更换。
+- 生产域名启用 HTTPS。
+- 普通用户无法访问他人任务详情。
