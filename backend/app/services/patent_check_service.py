@@ -29,6 +29,12 @@ FILE_ROLES = {
 }
 
 
+def has_selected_file(file: UploadFile | None) -> bool:
+    """Return whether a multipart file field contains a user-selected file."""
+
+    return file is not None and bool(file.filename)
+
+
 def ensure_supported_upload(file: UploadFile, settings: Settings) -> bytes:
     """Validate an uploaded file and return its content bytes."""
 
@@ -62,7 +68,11 @@ def enqueue_patent_check(task_id: str, settings: Settings) -> None:
     if not settings.enable_worker_queue:
         return
     queue = Queue("patent-checks", connection=Redis.from_url(settings.redis_url))
-    queue.enqueue("app.worker.run_patent_check_task", task_id, job_timeout=600)
+    queue.enqueue(
+        "app.worker.run_patent_check_task",
+        task_id,
+        job_timeout=settings.worker_job_timeout_seconds,
+    )
 
 
 def create_patent_check_task(
@@ -77,10 +87,10 @@ def create_patent_check_task(
 
     required_roles = ("claims", "specification")
     for role in required_roles:
-        if uploads.get(role) is None:
+        if not has_selected_file(uploads.get(role)):
             raise UserFacingError(f"{FILE_ROLES[role]}为必填项。")
 
-    provided = {role: file for role, file in uploads.items() if file is not None}
+    provided = {role: file for role, file in uploads.items() if has_selected_file(file)}
     if len(provided) > settings.max_task_files:
         raise UserFacingError(f"单个任务最多上传 {settings.max_task_files} 个文件。")
 

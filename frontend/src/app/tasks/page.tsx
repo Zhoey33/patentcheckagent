@@ -102,7 +102,12 @@ export default function TasksPage() {
                 <div className="truncate font-medium text-ink">{task.title}</div>
                 <div className="truncate text-xs text-muted">{task.technical_field || "未填写技术领域"}</div>
               </div>
-              <div><StatusBadge status={task.status} /></div>
+              <div>
+                <StatusBadge status={task.status} />
+                {task.status === "pending" || task.status === "running" ? (
+                  <div className="mt-1 text-xs text-muted">{task.progress_percent}%</div>
+                ) : null}
+              </div>
               <div className="hidden text-muted md:block">{task.finished_at ? new Date(task.finished_at).toLocaleString() : "-"}</div>
               <div className="text-muted">{new Date(task.created_at).toLocaleString()}</div>
             </Link>

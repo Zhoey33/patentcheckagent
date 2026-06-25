@@ -12,11 +12,13 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.patent_checks import router as patent_checks_router
 from app.core.config import get_settings
+from app.core.logging import configure_logging
 from app.db.base import Base
 from app.db.session import engine
 from app.services.errors import UserFacingError
 
 settings = get_settings()
+configure_logging(settings)
 
 
 @asynccontextmanager

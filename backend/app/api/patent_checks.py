@@ -87,6 +87,10 @@ def get_report(
     return PatentCheckReportRead(
         id=task.id,
         status=task.status,
+        progress_stage=task.progress_stage,
+        progress_percent=task.progress_percent,
+        progress_message=task.progress_message,
+        progress_steps=task.progress_steps,
         final_report=task.final_report,
         error_message=task.error_message,
     )
@@ -107,7 +111,13 @@ def retry_task(
     if not task.process_text_path:
         raise UserFacingError("任务输入已按安全策略清理，请重新提交文件后发起审查。")
     task.status = "pending"
+    task.progress_stage = "queued"
+    task.progress_percent = 5
+    task.progress_message = "任务已重新提交，等待审查队列调度。"
     task.error_message = None
+    task.started_at = None
+    task.finished_at = None
+    task.input_cleanup_status = "pending"
     db.commit()
     db.refresh(task)
     enqueue_patent_check(task.id, settings)

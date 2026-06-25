@@ -49,7 +49,30 @@ GET  /api/admin/patent-checks
 3. 查看 `worker` 日志。
 4. 查看任务详情中的失败原因。
 
-日志中不得打印完整 API key 或完整专利文本。
+按任务 ID 查看 Worker 日志：
+
+```bash
+docker compose logs worker | grep '<task_id>'
+```
+
+查看模型调用审计记录：
+
+```bash
+docker compose exec -T postgres psql -U patent_user -d patent_check_agent \
+  -c "select stage,status,error_message,latency_ms,created_at from model_call_logs where task_id='<task_id>' order by created_at;"
+```
+
+日志事件说明：
+
+- `patent_task_started`：Worker 开始处理任务。
+- `model_stage_started`：开始某个模型审查阶段。
+- `model_call_attempt_started`：开始一次模型 HTTP 调用。
+- `model_call_attempt_failed`：单次模型 HTTP 调用失败，包含错误类型和 HTTP 状态码。
+- `model_stage_failed`：某个阶段最终失败，并已写入审计表。
+- `patent_task_timeout`：任务超过 Worker 作业超时。
+- `patent_task_succeeded`：任务生成最终报告。
+
+日志中不得打印完整 API key 或完整专利文本。默认 Worker 作业超时由 `WORKER_JOB_TIMEOUT_SECONDS` 控制，应大于两阶段模型调用的最坏耗时。
 
 ## Docker Hub 拉取超时
 
@@ -67,7 +90,7 @@ NGINX_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
 
 ## 上传与清理
 
-Worker 在任务成功或失败后清理上传原始文件和过程文本，仅保留文件元数据、状态、错误、阶段结果和最终报告。如果任务一直停留在 `pending`，优先检查 Redis 和 Worker 是否正常。
+Worker 在任务成功后清理上传原始文件和过程文本，仅保留文件元数据、状态、错误、阶段结果和最终报告。任务失败时会清理上传原始文件，但保留可重试所需的过程文本；用户点击重试并成功完成后，过程文本会被清理。如果任务一直停留在 `pending`，优先检查 Redis 和 Worker 是否正常。
 
 ## 上线前安全清单
 

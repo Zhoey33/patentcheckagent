@@ -7,13 +7,55 @@ import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Clipboard, Download, RotateCcw } from "lucide-react";
+import {
+  CheckCircle2,
+  Circle,
+  Clipboard,
+  Download,
+  Loader2,
+  RotateCcw,
+  XCircle
+} from "lucide-react";
 
 import { AppShell } from "@/components/AppShell";
 import { StatusBadge } from "@/components/StatusBadge";
 import { apiFetch, ApiError } from "@/lib/api";
 import type { PatentCheckReport, PatentCheckTask } from "@/lib/types";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+
+const stepStyleMap: Record<string, { dot: string; text: string; line: string }> = {
+  done: {
+    dot: "border-emerald-500 bg-emerald-500 text-white",
+    text: "text-ink",
+    line: "bg-emerald-500"
+  },
+  running: {
+    dot: "border-accent bg-white text-accent",
+    text: "text-accent",
+    line: "bg-line"
+  },
+  failed: {
+    dot: "border-red-500 bg-red-500 text-white",
+    text: "text-danger",
+    line: "bg-line"
+  },
+  pending: {
+    dot: "border-line bg-white text-muted",
+    text: "text-muted",
+    line: "bg-line"
+  }
+};
+
+function clampProgress(value: number | undefined) {
+  return Math.max(0, Math.min(100, value ?? 0));
+}
+
+function ProgressIcon({ status }: { status: string }) {
+  if (status === "done") return <CheckCircle2 className="h-4 w-4" />;
+  if (status === "failed") return <XCircle className="h-4 w-4" />;
+  if (status === "running") return <Loader2 className="h-4 w-4 animate-spin" />;
+  return <Circle className="h-4 w-4" />;
+}
 
 export default function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -23,6 +65,9 @@ export default function TaskDetailPage() {
   const [error, setError] = useState("");
 
   const shouldPoll = task?.status === "pending" || task?.status === "running";
+  const progressPercent = clampProgress(task?.progress_percent ?? report?.progress_percent);
+  const progressMessage = task?.progress_message ?? report?.progress_message ?? "等待任务状态更新。";
+  const progressSteps = task?.progress_steps ?? report?.progress_steps ?? [];
 
   async function loadTask() {
     try {
@@ -145,6 +190,54 @@ export default function TaskDetailPage() {
         </section>
       ) : null}
 
+      {task ? (
+        <section className="mb-4 rounded border border-line bg-white p-4">
+          <div className="mb-3 flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
+            <div>
+              <h2 className="text-base font-semibold text-ink">审查进度</h2>
+              <p className="mt-1 text-sm text-muted">{progressMessage}</p>
+            </div>
+            <div className="text-sm font-semibold text-accent">{progressPercent}%</div>
+          </div>
+          <div className="h-2 overflow-hidden rounded bg-panel">
+            <div
+              className="h-full rounded bg-accent transition-all duration-500"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+          {progressSteps.length ? (
+            <div className="mt-4 grid gap-3 md:grid-cols-6">
+              {progressSteps.map((step, index) => {
+                const style = stepStyleMap[step.status] || stepStyleMap.pending;
+                return (
+                  <div key={step.key} className="relative flex gap-2 md:block">
+                    {index < progressSteps.length - 1 ? (
+                      <div
+                        className={[
+                          "absolute left-4 top-8 h-[calc(100%-1rem)] w-px",
+                          "md:left-[calc(50%+1rem)] md:top-4 md:h-px md:w-[calc(100%-2rem)]",
+                          style.line
+                        ].join(" ")}
+                      />
+                    ) : null}
+                    <div className="relative z-10 flex md:justify-center">
+                      <span
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full border ${style.dot}`}
+                      >
+                        <ProgressIcon status={step.status} />
+                      </span>
+                    </div>
+                    <div className={`min-w-0 pt-1 text-sm md:mt-2 md:text-center ${style.text}`}>
+                      {step.label}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
       {task?.files.length ? (
         <section className="mb-4 rounded border border-line bg-white p-4">
           <h2 className="mb-3 text-base font-semibold text-ink">上传文件</h2>
@@ -172,7 +265,7 @@ export default function TaskDetailPage() {
           </div>
         ) : (
           <div className="py-16 text-center text-sm text-muted">
-            {shouldPoll ? "审查任务正在执行，页面会自动刷新状态。" : "暂无报告。"}
+            {shouldPoll ? progressMessage : "暂无报告。"}
           </div>
         )}
       </section>

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_secret_key: str = Field(default="change-me-in-production", min_length=8)
     frontend_url: str = "http://localhost:3000"
+    log_level: str = "INFO"
 
     database_url: str = "sqlite:///./patent_check_agent.sqlite3"
     redis_url: str = "redis://localhost:6379/0"
@@ -24,6 +25,7 @@ class Settings(BaseSettings):
     gpt_model: str = "gpt-5.5"
     gpt_timeout_seconds: int = 180
     gpt_max_retries: int = 2
+    worker_job_timeout_seconds: int = 1_800
 
     max_file_size_mb: int = 20
     max_task_files: int = 4

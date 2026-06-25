@@ -8,6 +8,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
+PROGRESS_STEPS = [
+    ("queued", "排队等待执行", 5),
+    ("preparing", "准备审查材料", 15),
+    ("stage_one", "第一阶段：权利要求书检查", 40),
+    ("stage_two", "第二阶段：说明书/附图/摘要检查", 75),
+    ("finalizing", "整理最终报告", 92),
+    ("completed", "审查完成", 100),
+]
+
+PROGRESS_STAGE_ORDER = {step[0]: index for index, step in enumerate(PROGRESS_STEPS)}
+PROGRESS_STAGE_DEFAULTS = {step[0]: step[2] for step in PROGRESS_STEPS}
+
 
 class PatentCheckTask(Base):
     """Asynchronous patent check task submitted by an internal user."""
@@ -29,6 +41,13 @@ class PatentCheckTask(Base):
     input_cleanup_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
     process_text_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True, nullable=False)
+    progress_stage: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress_percent: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    progress_message: Mapped[str] = mapped_column(
+        String(255),
+        default="任务已提交，等待审查队列调度。",
+        nullable=False,
+    )
     stage_one_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_report: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -51,3 +70,32 @@ class PatentCheckTask(Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def progress_steps(self) -> list[dict[str, str]]:
+        """Return ordered progress nodes for API consumers."""
+
+        current_stage = self.progress_stage or infer_progress_stage(self.status)
+        current_index = PROGRESS_STAGE_ORDER.get(current_stage, 0)
+        steps = []
+        for index, (key, label, _) in enumerate(PROGRESS_STEPS):
+            if self.status == "failed" and index == current_index:
+                step_status = "failed"
+            elif index < current_index or self.status == "succeeded":
+                step_status = "done"
+            elif index == current_index:
+                step_status = "running" if self.status in {"pending", "running"} else "pending"
+            else:
+                step_status = "pending"
+            steps.append({"key": key, "label": label, "status": step_status})
+        return steps
+
+
+def infer_progress_stage(status: str) -> str:
+    """Map task status to a stable progress stage for older rows."""
+
+    if status == "succeeded":
+        return "completed"
+    if status == "running":
+        return "preparing"
+    return "queued"

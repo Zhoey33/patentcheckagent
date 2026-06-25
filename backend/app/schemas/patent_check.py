@@ -19,6 +19,12 @@ class PatentCheckFileRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PatentCheckProgressStepRead(BaseModel):
+    key: str
+    label: str
+    status: str
+
+
 class PatentCheckTaskRead(BaseModel):
     id: str
     title: str
@@ -29,6 +35,10 @@ class PatentCheckTaskRead(BaseModel):
     drawings_text_length: int
     abstract_text_length: int
     input_cleanup_status: str
+    progress_stage: str
+    progress_percent: int
+    progress_message: str
+    progress_steps: list[PatentCheckProgressStepRead]
     error_message: str | None
     created_at: datetime
     started_at: datetime | None
@@ -48,5 +58,9 @@ class PatentCheckTaskList(BaseModel):
 class PatentCheckReportRead(BaseModel):
     id: str
     status: str
+    progress_stage: str
+    progress_percent: int
+    progress_message: str
+    progress_steps: list[PatentCheckProgressStepRead]
     final_report: str | None
     error_message: str | None

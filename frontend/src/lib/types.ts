@@ -19,6 +19,12 @@ export type PatentCheckFile = {
   created_at: string;
 };
 
+export type PatentCheckProgressStep = {
+  key: string;
+  label: string;
+  status: "pending" | "running" | "done" | "failed" | string;
+};
+
 export type PatentCheckTask = {
   id: string;
   title: string;
@@ -29,6 +35,10 @@ export type PatentCheckTask = {
   drawings_text_length: number;
   abstract_text_length: number;
   input_cleanup_status: string;
+  progress_stage: string;
+  progress_percent: number;
+  progress_message: string;
+  progress_steps: PatentCheckProgressStep[];
   error_message: string | null;
   created_at: string;
   started_at: string | null;
@@ -46,6 +56,10 @@ export type PatentCheckTaskList = {
 export type PatentCheckReport = {
   id: string;
   status: string;
+  progress_stage: string;
+  progress_percent: number;
+  progress_message: string;
+  progress_steps: PatentCheckProgressStep[];
   final_report: string | null;
   error_message: string | null;
 };
