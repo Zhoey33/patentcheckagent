@@ -80,6 +80,7 @@ textarea {
 
 .markdown-body p {
   margin: 12px 0;
+  white-space: pre-line;
 }
 
 .markdown-body ul,
