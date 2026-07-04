@@ -22,6 +22,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { API_BASE_URL, apiFetch, ApiError } from "@/lib/api";
 import { formatPatentEventMessage, formatPatentEventStage } from "@/lib/patentEvents";
 import type { PatentCheckEvent, PatentCheckEventList, PatentCheckReport, PatentCheckTask } from "@/lib/types";
+import type { PatentCheckTaskStatus } from "@/lib/types";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 const stepStyleMap: Record<string, { dot: string; text: string; line: string }> = {
@@ -40,6 +41,11 @@ const stepStyleMap: Record<string, { dot: string; text: string; line: string }> 
     text: "text-danger",
     line: "bg-line"
   },
+  cancelled: {
+    dot: "border-zinc-400 bg-zinc-100 text-zinc-600",
+    text: "text-muted",
+    line: "bg-line"
+  },
   pending: {
     dot: "border-line bg-white text-muted",
     text: "text-muted",
@@ -53,9 +59,17 @@ function clampProgress(value: number | undefined) {
 
 function ProgressIcon({ status }: { status: string }) {
   if (status === "done") return <CheckCircle2 className="h-4 w-4" />;
-  if (status === "failed") return <XCircle className="h-4 w-4" />;
+  if (status === "failed" || status === "cancelled") return <XCircle className="h-4 w-4" />;
   if (status === "running") return <Loader2 className="h-4 w-4 animate-spin" />;
   return <Circle className="h-4 w-4" />;
+}
+
+function isActiveStatus(status: string | undefined) {
+  return status === "pending" || status === "running";
+}
+
+function isTerminalStatus(status: string | undefined) {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 
 function appendPatentEvent(current: PatentCheckEvent[], nextEvent: PatentCheckEvent) {
@@ -114,6 +128,21 @@ function isDuplicateReportHeading(line: string, stageHeading: string) {
   return normalized === "专利文件检查报告" || normalized === stageHeading;
 }
 
+function normalizeMarkdownForDisplay(markdown: string) {
+  let inFence = false;
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      return line.replace(/^(#{1,6})([^\s#].*)$/, "$1 $2");
+    })
+    .join("\n");
+}
+
 export default function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user, loading } = useCurrentUser();
@@ -122,12 +151,44 @@ export default function TaskDetailPage() {
   const [events, setEvents] = useState<PatentCheckEvent[]>([]);
   const [error, setError] = useState("");
   const [eventError, setEventError] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isEventStreamActive, setIsEventStreamActive] = useState(false);
   const lastEventIdRef = useRef(0);
 
-  const shouldPoll = task?.status === "pending" || task?.status === "running";
+  const shouldPoll = isActiveStatus(task?.status);
+  const canCancel = isActiveStatus(task?.status);
   const progressPercent = clampProgress(task?.progress_percent ?? report?.progress_percent);
   const progressMessage = task?.progress_message ?? report?.progress_message ?? "等待任务状态更新。";
   const progressSteps = task?.progress_steps ?? report?.progress_steps ?? [];
+
+  function applyTaskStatus(status: PatentCheckTaskStatus) {
+    setTask((current) =>
+      current
+        ? {
+            ...current,
+            status: status.status,
+            progress_stage: status.progress_stage,
+            progress_percent: status.progress_percent,
+            progress_message: status.progress_message,
+            progress_steps: status.progress_steps,
+            error_message: status.error_message
+          }
+        : current
+    );
+    setReport((current) =>
+      current
+        ? {
+            ...current,
+            status: status.status,
+            progress_stage: status.progress_stage,
+            progress_percent: status.progress_percent,
+            progress_message: status.progress_message,
+            progress_steps: status.progress_steps,
+            error_message: status.error_message
+          }
+        : current
+    );
+  }
 
   async function loadTask() {
     try {
@@ -153,12 +214,12 @@ export default function TaskDetailPage() {
   }, [loading, id]);
 
   useEffect(() => {
-    if (!shouldPoll) return;
+    if (!shouldPoll || isEventStreamActive) return;
     const timer = window.setInterval(() => {
       void loadTask();
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [shouldPoll, id]);
+  }, [shouldPoll, isEventStreamActive, id]);
 
   useEffect(() => {
     if (!shouldPoll || typeof window === "undefined" || !("EventSource" in window)) return;
@@ -166,6 +227,9 @@ export default function TaskDetailPage() {
     const streamUrl = new URL(`${API_BASE_URL}/api/patent-checks/${id}/events/stream`);
     streamUrl.searchParams.set("after_id", String(lastEventIdRef.current));
     const source = new EventSource(streamUrl.toString(), { withCredentials: true });
+    source.onopen = () => {
+      setIsEventStreamActive(true);
+    };
 
     function handleEvent(message: MessageEvent) {
       const nextEvent = JSON.parse((message as MessageEvent).data) as PatentCheckEvent;
@@ -176,17 +240,26 @@ export default function TaskDetailPage() {
     source.addEventListener("codex_event", (message) => handleEvent(message as MessageEvent));
     source.addEventListener("report_snapshot", (message) => handleEvent(message as MessageEvent));
 
-    source.addEventListener("task_status", () => {
-      source.close();
-      void loadTask();
+    source.addEventListener("task_status", (message) => {
+      const status = JSON.parse((message as MessageEvent).data) as PatentCheckTaskStatus;
+      applyTaskStatus(status);
+      if (isTerminalStatus(status.status)) {
+        source.close();
+        setIsEventStreamActive(false);
+        void loadTask();
+      }
     });
 
     source.onerror = () => {
       setEventError("实时连接已断开，页面将继续轮询更新。");
+      setIsEventStreamActive(false);
       source.close();
     };
 
-    return () => source.close();
+    return () => {
+      setIsEventStreamActive(false);
+      source.close();
+    };
   }, [shouldPoll, id]);
 
   const timelineEvents = useMemo(
@@ -195,7 +268,7 @@ export default function TaskDetailPage() {
   );
   const streamingMarkdown = useMemo(() => buildStreamingMarkdown(events), [events]);
   const markdown = useMemo(
-    () => report?.final_report || streamingMarkdown,
+    () => normalizeMarkdownForDisplay(report?.final_report || streamingMarkdown),
     [report, streamingMarkdown]
   );
 
@@ -219,6 +292,20 @@ export default function TaskDetailPage() {
   async function retryTask() {
     await apiFetch<PatentCheckTask>(`/api/patent-checks/${id}/retry`, { method: "POST" });
     await loadTask();
+  }
+
+  async function cancelTask() {
+    if (!window.confirm("确定取消本次审查吗？取消后当前审查过程会停止更新。")) return;
+    try {
+      setIsCancelling(true);
+      const nextTask = await apiFetch<PatentCheckTask>(`/api/patent-checks/${id}/cancel`, { method: "POST" });
+      setTask(nextTask);
+      await loadTask();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "取消任务失败。");
+    } finally {
+      setIsCancelling(false);
+    }
   }
 
   if (loading) {
@@ -260,6 +347,17 @@ export default function TaskDetailPage() {
             >
               <RotateCcw className="h-4 w-4" />
               重试
+            </button>
+          ) : null}
+          {canCancel ? (
+            <button
+              type="button"
+              onClick={cancelTask}
+              disabled={isCancelling}
+              className="inline-flex h-10 items-center gap-2 rounded border border-red-200 bg-white px-3 text-sm font-semibold text-danger hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isCancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+              取消审查
             </button>
           ) : null}
         </div>

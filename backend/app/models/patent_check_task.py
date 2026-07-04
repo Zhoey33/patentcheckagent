@@ -87,6 +87,8 @@ class PatentCheckTask(Base):
         for index, (key, label, _) in enumerate(PROGRESS_STEPS):
             if self.status == "failed" and index == current_index:
                 step_status = "failed"
+            elif self.status == "cancelled" and index == current_index:
+                step_status = "cancelled"
             elif index < current_index or self.status == "succeeded":
                 step_status = "done"
             elif index == current_index:

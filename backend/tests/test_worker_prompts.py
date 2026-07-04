@@ -90,3 +90,17 @@ def test_stage_two_uses_bridge_section_instead_of_full_stage_one_report() -> Non
     assert "解释A" in bridge
     assert "这里是一大段第一阶段问题解释" not in user_content
     assert "解释A" in user_content
+
+
+def test_stage_two_prompt_mentions_visual_attachments_when_present() -> None:
+    messages = build_stage_two_messages(
+        PROMPT,
+        {"specification": "说明书文本", "drawings": "", "abstract": ""},
+        "人工智能",
+        "### 技术特征分解与需说明书解释项清单\n| 权1 | A |",
+        visual_attachment_count=2,
+    )
+    user_content = messages[1]["content"]
+
+    assert "附加了 2 张实际图像" in user_content
+    assert "图1" in user_content

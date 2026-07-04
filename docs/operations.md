@@ -77,7 +77,9 @@ docker compose exec -T postgres psql -U patent_user -d patent_check_agent \
 - `patent_task_timeout`：任务超过 Worker 作业超时。
 - `patent_task_succeeded`：任务生成最终报告。
 
-日志中不得打印完整认证信息或完整专利文本。默认 Worker 作业超时由 `WORKER_JOB_TIMEOUT_SECONDS` 控制，应大于两阶段 Codex 执行的最坏耗时。
+日志中不得打印完整认证信息或完整专利文本。单个 Codex 阶段超时由 `CODEX_TIMEOUT_SECONDS`
+控制，默认 300 秒；Worker 作业超时由 `WORKER_JOB_TIMEOUT_SECONDS` 控制，应大于两阶段
+Codex 执行的最坏耗时。
 
 ## Docker Hub 拉取超时
 

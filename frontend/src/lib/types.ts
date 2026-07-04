@@ -22,7 +22,7 @@ export type PatentCheckFile = {
 export type PatentCheckProgressStep = {
   key: string;
   label: string;
-  status: "pending" | "running" | "done" | "failed" | string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled" | string;
 };
 
 export type PatentCheckTask = {
@@ -76,4 +76,13 @@ export type PatentCheckEvent = {
 
 export type PatentCheckEventList = {
   items: PatentCheckEvent[];
+};
+
+export type PatentCheckTaskStatus = {
+  status: string;
+  progress_stage: string;
+  progress_percent: number;
+  progress_message: string;
+  progress_steps: PatentCheckProgressStep[];
+  error_message: string | null;
 };

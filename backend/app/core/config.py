@@ -24,9 +24,9 @@ class Settings(BaseSettings):
 
     codex_command: str = "codex"
     codex_skill_path: Path = Path("skills/check-patent.md")
-    codex_timeout_seconds: int = 1_800
+    codex_timeout_seconds: int = 300
     codex_model: str | None = None
-    codex_sandbox_mode: str = "danger-full-access"
+    codex_sandbox_mode: str = "read-only"
     gpt_base_url: str | None = None
     gpt_api_key: str | None = None
     gpt_model: str | None = None

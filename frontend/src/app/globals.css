@@ -58,4 +58,32 @@ textarea {
   margin-top: 24px;
   margin-bottom: 12px;
   color: #17212b;
+  font-weight: 700;
+  line-height: 1.28;
+}
+
+.markdown-body h1 {
+  border-bottom: 1px solid #d8e1e7;
+  padding-bottom: 10px;
+  font-size: 28px;
+}
+
+.markdown-body h2 {
+  border-bottom: 1px solid #eef3f6;
+  padding-bottom: 8px;
+  font-size: 22px;
+}
+
+.markdown-body h3 {
+  font-size: 18px;
+}
+
+.markdown-body p {
+  margin: 12px 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 12px 0;
+  padding-left: 24px;
 }

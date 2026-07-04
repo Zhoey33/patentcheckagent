@@ -1,6 +1,7 @@
 """这个文件用于编排专利审查任务创建、权限校验和队列投递。"""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,6 +76,37 @@ def enqueue_patent_check(task_id: str, settings: Settings) -> None:
     )
 
 
+def cancel_patent_check_task(db: Session, task: PatentCheckTask) -> PatentCheckTask:
+    """Mark a queued or running task as cancelled."""
+
+    if task.status not in {"pending", "running"}:
+        return task
+    should_cleanup_now = task.status == "pending"
+    task.status = "cancelled"
+    task.progress_message = "用户已取消审查。"
+    task.error_message = None
+    task.finished_at = datetime.now(UTC)
+    if should_cleanup_now:
+        cleanup_persisted_task_inputs(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def cleanup_persisted_task_inputs(task: PatentCheckTask) -> None:
+    """Delete uploaded files and task input JSON attached to one task."""
+
+    for file in task.files:
+        if file.stored_path:
+            Path(file.stored_path).unlink(missing_ok=True)
+            file.stored_path = None
+    process_text_path = Path(task.process_text_path) if task.process_text_path else None
+    if process_text_path:
+        process_text_path.unlink(missing_ok=True)
+        task.process_text_path = None
+    task.input_cleanup_status = "cleaned"
+
+
 def create_patent_check_task(
     db: Session,
     settings: Settings,
@@ -103,7 +135,16 @@ def create_patent_check_task(
             content = ensure_supported_upload(file, settings)
             stored_path = save_upload(content, file.filename or f"{role}.pdf", role, settings)
             stored_paths.append(stored_path)
-            text = extract_document_text(stored_path)
+            extraction_status = "succeeded"
+            extraction_error = None
+            try:
+                text = extract_document_text(stored_path)
+            except UserFacingError as exc:
+                if not can_accept_visual_only_upload(role, exc):
+                    raise
+                text = ""
+                extraction_status = "text_unavailable"
+                extraction_error = exc.message
             extracted_texts[role] = text
             files.append(
                 PatentCheckFile(
@@ -113,7 +154,8 @@ def create_patent_check_task(
                     content_type=file.content_type,
                     file_size_bytes=len(content),
                     extracted_text_length=len(text),
-                    extraction_status="succeeded",
+                    extraction_status=extraction_status,
+                    extraction_error=extraction_error,
                 )
             )
 
@@ -152,6 +194,14 @@ def create_patent_check_task(
         for path in stored_paths:
             path.unlink(missing_ok=True)
         raise
+
+
+def can_accept_visual_only_upload(role: str, error: UserFacingError) -> bool:
+    """Return whether a visual-only optional upload may continue without text."""
+
+    if role != "drawings":
+        return False
+    return "未能抽取到" in error.message
 
 
 def get_task_for_user(db: Session, task_id: str, user: User) -> PatentCheckTask:

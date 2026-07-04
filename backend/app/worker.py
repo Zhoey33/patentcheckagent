@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from rq.timeouts import JobTimeoutException
 from sqlalchemy.orm import selectinload
@@ -18,6 +19,7 @@ from app.models.patent_check_task import PROGRESS_STAGE_DEFAULTS, PatentCheckTas
 from app.services.codex_client import CodexClient, CodexEvent, CodexRunResult
 from app.services.errors import UserFacingError
 from app.services.prompt_loader import load_check_patent_prompt
+from app.services.visual_attachment_extractor import collect_visual_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,10 @@ STAGE_TWO_OUTPUT_INSTRUCTION = """
 """.strip()
 
 
+class TaskCancelledError(Exception):
+    """Raised when a user cancels a task while the worker is running."""
+
+
 def run_patent_check_task(task_id: str) -> None:
     """Run the two-stage patent check task and persist the final report."""
 
@@ -56,6 +62,8 @@ def run_patent_check_task(task_id: str) -> None:
         )
         if task is None:
             return
+        if task.status == "cancelled":
+            return
 
         logger.info("patent_task_started task_id=%s user_id=%s", task.id, task.user_id)
         task.status = "running"
@@ -65,10 +73,12 @@ def run_patent_check_task(task_id: str) -> None:
         db.commit()
 
         try:
+            ensure_task_not_cancelled(db, task)
             payload = load_process_text(task)
             prompt = load_check_patent_prompt()
             client = CodexClient(settings, workspace=Path.cwd())
 
+            ensure_task_not_cancelled(db, task)
             set_task_progress(task, "stage_one", "正在执行第一阶段：权利要求书检查与特征分解。")
             db.commit()
             stage_one = call_and_log(
@@ -80,6 +90,7 @@ def run_patent_check_task(task_id: str) -> None:
                     build_stage_one_messages(prompt, payload, task.technical_field)
                 ),
             )
+            ensure_task_not_cancelled(db, task)
             task.stage_one_result = stage_one.content
             set_task_progress(
                 task,
@@ -93,21 +104,31 @@ def run_patent_check_task(task_id: str) -> None:
                 len(stage_one.content),
             )
 
-            stage_two = call_and_log(
-                db=db,
-                task=task,
-                client=client,
-                stage="stage_two",
-                prompt=format_messages_for_codex(
-                    build_stage_two_messages(
-                        prompt,
-                        payload,
-                        task.technical_field,
-                        stage_one.content,
-                    )
-                ),
-            )
+            settings.upload_dir.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(
+                prefix=f"task-visuals-{task.id}-",
+                dir=settings.upload_dir,
+            ) as visual_dir:
+                ensure_task_not_cancelled(db, task)
+                image_paths = collect_visual_attachments(task.files, Path(visual_dir))
+                stage_two = call_and_log(
+                    db=db,
+                    task=task,
+                    client=client,
+                    stage="stage_two",
+                    prompt=format_messages_for_codex(
+                        build_stage_two_messages(
+                            prompt,
+                            payload,
+                            task.technical_field,
+                            stage_one.content,
+                            visual_attachment_count=len(image_paths),
+                        )
+                    ),
+                    image_paths=image_paths,
+                )
 
+            ensure_task_not_cancelled(db, task)
             set_task_progress(task, "finalizing", "第二阶段完成，正在整理最终 Markdown 报告。")
             task.final_report = normalize_final_report(stage_one.content, stage_two.content)
             task.status = "succeeded"
@@ -119,6 +140,13 @@ def run_patent_check_task(task_id: str) -> None:
                 task.id,
                 len(task.final_report or ""),
             )
+        except TaskCancelledError:
+            logger.info("patent_task_cancelled task_id=%s", task.id)
+            task.status = "cancelled"
+            task.progress_message = "用户已取消审查。"
+            task.error_message = None
+            task.finished_at = task.finished_at or datetime.now(UTC)
+            db.commit()
         except UserFacingError as exc:
             logger.warning(
                 "patent_task_failed task_id=%s error_type=%s message=%s",
@@ -193,11 +221,13 @@ def build_stage_two_messages(
     payload: dict[str, str],
     technical_field: str | None,
     stage_one_result: str,
+    visual_attachment_count: int = 0,
 ) -> list[dict[str, str]]:
     """Build model messages for specification, drawings and abstract checking."""
 
     stage_prompt = build_stage_prompt(prompt, "stage_two")
     stage_one_bridge = extract_stage_one_bridge(stage_one_result)
+    visual_note = build_visual_attachment_note(visual_attachment_count)
     return [
         {"role": "system", "content": stage_prompt},
         {
@@ -207,6 +237,7 @@ def build_stage_two_messages(
                     "请执行第二阶段：说明书、附图说明和摘要检查。",
                     f"技术领域：{technical_field or '未填写'}",
                     "必须基于第一阶段的需说明书解释项清单逐项检查说明书支持情况。",
+                    visual_note,
                     "【第一阶段结果】",
                     stage_one_bridge,
                     STAGE_TWO_OUTPUT_INSTRUCTION,
@@ -220,6 +251,17 @@ def build_stage_two_messages(
             ),
         },
     ]
+
+
+def build_visual_attachment_note(count: int) -> str:
+    """Build a user prompt note describing attached drawing images."""
+
+    if count <= 0:
+        return "本次未附加实际图像；如需核对图面内容，只能依据附图说明文字判断。"
+    return (
+        f"本次随 Codex 调用附加了 {count} 张实际图像，"
+        "请结合这些图像核对图1等附图内容、附图标记和说明书文字是否一致。"
+    )
 
 
 def build_stage_prompt(prompt: str, stage: str) -> str:
@@ -324,12 +366,21 @@ def set_task_progress(task: PatentCheckTask, stage: str, message: str) -> None:
     task.progress_message = message
 
 
+def ensure_task_not_cancelled(db, task: PatentCheckTask) -> None:
+    """Stop the worker at safe boundaries after a user cancellation."""
+
+    db.refresh(task)
+    if task.status == "cancelled":
+        raise TaskCancelledError
+
+
 def call_and_log(
     db,
     task: PatentCheckTask,
     client: CodexClient,
     stage: str,
     prompt: str,
+    image_paths: list[Path] | None = None,
 ) -> CodexRunResult:
     """Run Codex and persist audit log plus user-visible execution events."""
 
@@ -339,6 +390,7 @@ def call_and_log(
             stage=stage,
             prompt=prompt,
             on_event=lambda event: persist_codex_event(db, task, event),
+            image_paths=image_paths,
         )
         db.add(
             ModelCallLog(
@@ -403,6 +455,7 @@ def call_and_log(
 def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
     """Persist one Codex execution event and surface it as current task progress."""
 
+    db.refresh(task)
     db.add(
         PatentCheckEvent(
             task_id=task.id,
@@ -412,7 +465,7 @@ def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
             raw_payload=json.dumps(event.raw_payload, ensure_ascii=False),
         )
     )
-    if event.event_type != "report_snapshot":
+    if event.event_type != "report_snapshot" and task.status != "cancelled":
         task.progress_message = event.message[:255]
     db.commit()
 

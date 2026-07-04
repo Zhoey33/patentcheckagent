@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import select
 import subprocess
 import threading
 import time
@@ -51,13 +52,17 @@ class CodexClient:
         stage: str,
         prompt: str,
         on_event: Callable[[CodexEvent], None],
+        image_paths: list[Path] | None = None,
     ) -> CodexRunResult:
         """Execute Codex with the configured skill and stream parsed events."""
 
         skill_path = self._resolve_skill_path()
-        skill_text = skill_path.read_text(encoding="utf-8")
-        full_prompt = build_codex_prompt(skill_path, skill_text, prompt)
-        command = self._build_command()
+        full_prompt = build_codex_prompt(
+            skill_path,
+            prompt,
+            visual_attachment_count=len(image_paths or []),
+        )
+        command = self._build_command(image_paths or [])
         started_at = time.perf_counter()
         thread_id: str | None = None
         final_message = ""
@@ -109,10 +114,14 @@ class CodexClient:
 
             stderr_thread = drain_stream(getattr(process, "stderr", None), stderr_lines)
             if getattr(process, "stdout", None) is not None:
-                for line in process.stdout:
-                    handle_stdout_line(line)
+                read_stdout_with_timeout(
+                    process,
+                    timeout_seconds=self.settings.codex_timeout_seconds,
+                    started_at=started_at,
+                    on_line=handle_stdout_line,
+                )
 
-            returncode = process.wait(timeout=self.settings.codex_timeout_seconds)
+            returncode = process.wait(timeout=1)
             if stderr_thread:
                 stderr_thread.join(timeout=1)
         except subprocess.TimeoutExpired as exc:
@@ -154,7 +163,7 @@ class CodexClient:
             raise UserFacingError(f"Codex skill 不存在：{skill_path}", 500)
         return skill_path
 
-    def _build_command(self) -> list[str]:
+    def _build_command(self, image_paths: list[Path] | None = None) -> list[str]:
         command = [
             self.settings.codex_command,
             "--ask-for-approval",
@@ -164,9 +173,11 @@ class CodexClient:
         if effective_model:
             command.extend(["-m", effective_model])
         command.extend(self._build_provider_config_args())
+        command.append("exec")
+        for image_path in image_paths or []:
+            command.extend(["-i", str(image_path)])
         command.extend(
             [
-                "exec",
                 "--json",
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -214,20 +225,34 @@ def normalize_openai_compatible_base_url(base_url: str) -> str:
     return normalized
 
 
-def build_codex_prompt(skill_path: Path, skill_text: str, task_prompt: str) -> str:
-    """Combine the configured skill and the current task prompt for Codex."""
+def build_codex_prompt(
+    skill_path: Path,
+    task_prompt: str,
+    visual_attachment_count: int = 0,
+) -> str:
+    """Wrap the precompiled stage prompt so Codex runs as a text reviewer."""
 
+    task_mode = "本次任务是专利审查任务，不是代码修改任务。"
+    file_instruction = "不要读取文件，不要运行 shell 命令，不要检查仓库，不要输出执行计划。"
+    if visual_attachment_count > 0:
+        task_mode = (
+            f"本次任务是专利审查任务，不是代码修改任务；"
+            f"后端已通过 Codex CLI 附加 {visual_attachment_count} 张图片附件，"
+            "图片属于本阶段审查材料。"
+        )
+        file_instruction = (
+            "除已附加的图片附件外，不要读取文件，不要运行 shell 命令，"
+            "不要检查仓库，不要输出执行计划。"
+        )
     return "\n\n".join(
         [
-            "请严格使用下面提供的 skill 执行本次专利审查，不要修改仓库文件。",
-            f"Skill 文件：{skill_path}",
-            "<skill>",
-            skill_text,
-            "</skill>",
+            task_mode,
+            "后端已经确认配置的专利审查 skill 存在，并已把本阶段所需规则和材料编译到 <task> 中。",
+            file_instruction,
+            "直接依据 <task> 内容完成审查，并只在最终回答中输出本阶段 Markdown 审查结果。",
             "<task>",
             task_prompt,
             "</task>",
-            "请只在最终回答中输出本阶段 Markdown 审查结果。",
         ]
     )
 
@@ -315,7 +340,7 @@ def extract_final_message(payload: dict[str, Any]) -> str | None:
     inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
     if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-        return item["text"]
+        return item["text"] if looks_like_review_report(item["text"]) else None
     if isinstance(inner.get("last_agent_message"), str):
         return inner["last_agent_message"]
     if inner.get("type") == "message" and inner.get("role") == "assistant":
@@ -332,6 +357,15 @@ def extract_final_message(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def looks_like_review_report(text: str) -> bool:
+    """Return whether assistant text is actual Markdown report content, not process chatter."""
+
+    stripped = text.lstrip()
+    if stripped.startswith("#"):
+        return True
+    return "###" in stripped and ("问题" in stripped or "检查" in stripped or "审查" in stripped)
+
+
 def is_assistant_content_event(payload: dict[str, Any]) -> bool:
     """Return whether a Codex event primarily carries assistant report content."""
 
@@ -344,6 +378,34 @@ def is_assistant_content_event(payload: dict[str, Any]) -> bool:
     if payload.get("type") == "message" and payload.get("role") == "assistant":
         return True
     return False
+
+
+def read_stdout_with_timeout(
+    process: Any,
+    timeout_seconds: int,
+    started_at: float,
+    on_line: Callable[[str], None],
+) -> None:
+    """Read subprocess stdout without letting an open pipe bypass the total timeout."""
+
+    stdout = process.stdout
+    while True:
+        elapsed = time.perf_counter() - started_at
+        remaining = timeout_seconds - elapsed
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(getattr(process, "args", "codex"), timeout_seconds)
+
+        ready, _, _ = select.select([stdout], [], [], min(1.0, remaining))
+        if ready:
+            line = stdout.readline()
+            if line:
+                on_line(line)
+                continue
+
+        if process.poll() is not None:
+            for line in stdout:
+                on_line(line)
+            return
 
 
 def build_report_snapshot_event(stage: str, content: str) -> CodexEvent:

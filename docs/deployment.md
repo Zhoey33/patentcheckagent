@@ -183,7 +183,7 @@ cp deploy/asqmsl.cn.env.example .env
 APP_ENV=production
 FRONTEND_URL=https://asqmsl.cn
 NEXT_PUBLIC_API_BASE_URL=https://asqmsl.cn
-CODEX_SANDBOX_MODE=danger-full-access
+CODEX_SANDBOX_MODE=read-only
 ```
 
 如果部署到 `check.asqmsl.cn`，自动部署脚本会把 `FRONTEND_URL` 和 `NEXT_PUBLIC_API_BASE_URL` 更新为：

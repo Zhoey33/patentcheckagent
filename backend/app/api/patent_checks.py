@@ -22,6 +22,7 @@ from app.schemas.patent_check import (
 )
 from app.services.errors import UserFacingError
 from app.services.patent_check_service import (
+    cancel_patent_check_task,
     create_patent_check_task,
     enqueue_patent_check,
     get_task_for_user,
@@ -154,10 +155,7 @@ async def stream_task_events(
                 .limit(50)
             ).all()
             status_payload = {
-                "status": task.status,
-                "progress_stage": task.progress_stage,
-                "progress_percent": task.progress_percent,
-                "progress_message": task.progress_message,
+                **build_task_status_payload(task),
             }
             for event in events:
                 last_id = event.id
@@ -166,8 +164,8 @@ async def stream_task_events(
                     serialize_event(event),
                     event_id=event.id,
                 )
+            yield format_sse("task_status", status_payload)
             if status_payload["status"] in terminal_statuses:
-                yield format_sse("task_status", status_payload)
                 break
             await asyncio.sleep(1)
 
@@ -203,6 +201,31 @@ def retry_task(
     db.refresh(task)
     enqueue_patent_check(task.id, settings)
     return task
+
+
+@router.post("/{task_id}/cancel", response_model=PatentCheckTaskRead)
+def cancel_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PatentCheckTask:
+    """Cancel a queued or running patent check task."""
+
+    task = get_task_for_user(db, task_id, current_user)
+    return cancel_patent_check_task(db, task)
+
+
+def build_task_status_payload(task: PatentCheckTask) -> dict:
+    """Build the task status payload shared by polling and SSE consumers."""
+
+    return {
+        "status": task.status,
+        "progress_stage": task.progress_stage,
+        "progress_percent": task.progress_percent,
+        "progress_message": task.progress_message,
+        "progress_steps": task.progress_steps,
+        "error_message": task.error_message,
+    }
 
 
 def format_sse(event: str, payload: dict, event_id: int | None = None) -> str:

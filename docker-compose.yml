@@ -73,7 +73,10 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
-    command: ["rq", "worker", "patent-checks", "--url", "redis://redis:6379/0"]
+    command:
+      - /bin/sh
+      - -c
+      - python -m app.scripts.recover_stale_tasks && rq worker patent-checks --url redis://redis:6379/0
 
   frontend:
     build:

@@ -1,5 +1,6 @@
 """这个文件用于验证专利审查任务接口的上传校验和权限隔离。"""
 
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 from docx import Document
@@ -9,18 +10,27 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.datastructures import Headers
 
-from app.core.config import get_settings
+from app.api.patent_checks import build_task_status_payload
+from app.core.config import Settings, get_settings
 from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.main import create_app
 from app.models.model_call_log import ModelCallLog
 from app.models.patent_check_event import PatentCheckEvent
+from app.models.patent_check_file import PatentCheckFile
 from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
+from app.scripts.recover_stale_tasks import recover_stale_running_tasks
 from app.services.codex_client import CodexEvent, CodexRunResult
+from app.services.errors import UserFacingError
 from app.services.patent_check_service import create_patent_check_task
-from app.worker import call_and_log, normalize_final_report, run_patent_check_task
+from app.worker import (
+    call_and_log,
+    normalize_final_report,
+    persist_codex_event,
+    run_patent_check_task,
+)
 
 
 def login(client: TestClient, username: str = "alice") -> None:
@@ -159,6 +169,35 @@ def test_create_task_treats_drawings_as_optional(monkeypatch, client: TestClient
     payload = response.json()
     assert payload["drawings_text_length"] == 0
     assert len(payload["files"]) == 2
+
+
+def test_create_task_accepts_visual_only_drawings_upload(
+    monkeypatch, client: TestClient
+) -> None:
+    def fake_extract(path):
+        if path.name.startswith("drawings-"):
+            raise UserFacingError("未能抽取到可复制文本，请上传可复制文本型 PDF。")
+        return f"抽取文本 {path.name}"
+
+    monkeypatch.setattr("app.services.patent_check_service.extract_document_text", fake_extract)
+    login(client)
+
+    response = client.post(
+        "/api/patent-checks",
+        data={"title": "图片附图任务"},
+        files={
+            "claims": pdf_file("claims.pdf"),
+            "specification": pdf_file("specification.pdf"),
+            "drawings": pdf_file("drawings.pdf"),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    drawing_file = next(file for file in payload["files"] if file["file_role"] == "drawings")
+    assert payload["drawings_text_length"] == 0
+    assert drawing_file["extraction_status"] == "text_unavailable"
+    assert "未能抽取到" in drawing_file["extraction_error"]
 
 
 def test_create_task_ignores_empty_optional_file_inputs_from_browser(
@@ -375,6 +414,159 @@ def test_stream_task_events_includes_report_snapshot_content(
     assert '"content": "### 审查结论\\n- 存在问题"' in body
 
 
+def test_task_status_payload_includes_progress_steps(db_session: Session) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="状态同步任务",
+        status="running",
+        progress_stage="stage_two",
+        progress_percent=75,
+        progress_message="正在核对说明书。",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    payload = build_task_status_payload(task)
+
+    assert payload["status"] == "running"
+    assert payload["progress_percent"] == 75
+    assert payload["progress_steps"][3] == {
+        "key": "stage_two",
+        "label": "第二阶段：说明书/附图/摘要检查",
+        "status": "running",
+    }
+
+
+def test_cancel_pending_task_marks_cancelled_and_cleans_inputs(
+    tmp_path, client: TestClient, db_session: Session
+) -> None:
+    process_text_path = tmp_path / "task-input.json"
+    upload_path = tmp_path / "claims.pdf"
+    process_text_path.write_text('{"claims":"权利要求","specification":"说明书"}', encoding="utf-8")
+    upload_path.write_bytes(b"%PDF-1.4 fake content")
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="可取消任务",
+        status="pending",
+        process_text_path=str(process_text_path),
+        progress_stage="queued",
+        progress_percent=5,
+        progress_message="任务已提交，等待审查队列调度。",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckFile(
+            task_id=task.id,
+            file_role="claims",
+            original_filename="claims.pdf",
+            stored_path=str(upload_path),
+            content_type="application/pdf",
+            file_size_bytes=upload_path.stat().st_size,
+            extracted_text_length=10,
+            extraction_status="succeeded",
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    response = client.post(f"/api/patent-checks/{task.id}/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    db_session.refresh(task)
+    assert payload["status"] == "cancelled"
+    assert payload["progress_message"] == "用户已取消审查。"
+    assert task.input_cleanup_status == "cleaned"
+    assert task.process_text_path is None
+    assert not process_text_path.exists()
+    assert not upload_path.exists()
+    assert task.files[0].stored_path is None
+
+
+def test_cancel_running_task_keeps_inputs_for_worker_cleanup(
+    tmp_path, client: TestClient, db_session: Session
+) -> None:
+    process_text_path = tmp_path / "task-input.json"
+    upload_path = tmp_path / "claims.pdf"
+    process_text_path.write_text('{"claims":"权利要求","specification":"说明书"}', encoding="utf-8")
+    upload_path.write_bytes(b"%PDF-1.4 fake content")
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="运行中取消任务",
+        status="running",
+        process_text_path=str(process_text_path),
+        progress_stage="stage_one",
+        progress_percent=40,
+        progress_message="正在执行第一阶段。",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckFile(
+            task_id=task.id,
+            file_role="claims",
+            original_filename="claims.pdf",
+            stored_path=str(upload_path),
+            content_type="application/pdf",
+            file_size_bytes=upload_path.stat().st_size,
+            extracted_text_length=10,
+            extraction_status="succeeded",
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    response = client.post(f"/api/patent-checks/{task.id}/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    db_session.refresh(task)
+    assert payload["status"] == "cancelled"
+    assert task.input_cleanup_status == "pending"
+    assert task.process_text_path == str(process_text_path)
+    assert process_text_path.exists()
+    assert upload_path.exists()
+    assert task.files[0].stored_path == str(upload_path)
+
+
+def test_persist_codex_event_does_not_overwrite_cancelled_progress(
+    db_session: Session,
+) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="已取消事件任务",
+        status="cancelled",
+        progress_stage="stage_one",
+        progress_percent=40,
+        progress_message="用户已取消审查。",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    persist_codex_event(
+        db_session,
+        task,
+        CodexEvent(
+            stage="stage_one",
+            event_type="turn.completed",
+            message="第一阶段检查完成，准备核对说明书支持情况。",
+            raw_payload={"type": "turn.completed"},
+        ),
+    )
+
+    db_session.refresh(task)
+    assert task.progress_message == "用户已取消审查。"
+
+
 def test_retry_failed_task_requires_available_process_text(
     client: TestClient, db_session: Session
 ) -> None:
@@ -451,6 +643,53 @@ def test_retry_failed_task_clears_stale_outputs_and_events(
     assert remaining_event is None
 
 
+def test_recover_stale_running_tasks_marks_only_expired_tasks_retryable(
+    tmp_path, db_session: Session
+) -> None:
+    now = datetime(2026, 7, 4, 3, 20, tzinfo=UTC)
+    stale_input = tmp_path / "stale-input.json"
+    stale_input.write_text('{"claims":"权利要求","specification":"说明书"}', encoding="utf-8")
+    fresh_input = tmp_path / "fresh-input.json"
+    fresh_input.write_text('{"claims":"权利要求","specification":"说明书"}', encoding="utf-8")
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    stale_task = PatentCheckTask(
+        user_id=alice.id,
+        title="过期运行任务",
+        status="running",
+        progress_stage="stage_one",
+        progress_percent=40,
+        progress_message="正在执行第一阶段。",
+        process_text_path=str(stale_input),
+        started_at=now - timedelta(seconds=400),
+    )
+    fresh_task = PatentCheckTask(
+        user_id=alice.id,
+        title="近期运行任务",
+        status="running",
+        progress_stage="stage_one",
+        progress_percent=40,
+        progress_message="正在执行第一阶段。",
+        process_text_path=str(fresh_input),
+        started_at=now - timedelta(seconds=120),
+    )
+    db_session.add_all([stale_task, fresh_task])
+    db_session.commit()
+
+    recovered = recover_stale_running_tasks(
+        db_session,
+        settings=Settings(app_secret_key="test-secret-key-with-at-least-32-bytes"),
+        now=now,
+    )
+
+    assert recovered == 1
+    assert stale_task.status == "failed"
+    assert stale_task.input_cleanup_status == "retryable"
+    assert stale_task.finished_at == now.replace(tzinfo=None)
+    assert "可点击重试" in (stale_task.error_message or "")
+    assert fresh_task.status == "running"
+
+
 def test_normalize_final_report_keeps_stage_one_when_stage_two_has_title() -> None:
     report = normalize_final_report(
         "### 第一阶段发现\n- 权利要求缺少必要技术特征。",
@@ -525,7 +764,7 @@ def test_call_and_log_records_unexpected_model_exceptions(db_session: Session) -
     class BrokenClient:
         settings = type("SettingsStub", (), {"codex_model": "test-model"})()
 
-        def run(self, stage, prompt, on_event):
+        def run(self, stage, prompt, on_event, image_paths=None):
             raise RuntimeError("transport exploded")
 
     alice = db_session.scalar(select(User).where(User.username == "alice"))
@@ -557,7 +796,7 @@ def test_call_and_log_persists_codex_events(db_session: Session) -> None:
     class EventClient:
         settings = type("SettingsStub", (), {"codex_model": "codex-test-model"})()
 
-        def run(self, stage, prompt, on_event):
+        def run(self, stage, prompt, on_event, image_paths=None):
             on_event(
                 CodexEvent(
                     stage=stage,
@@ -591,3 +830,38 @@ def test_call_and_log_persists_codex_events(db_session: Session) -> None:
     assert log is not None
     assert log.model == "codex-test-model"
     assert log.status == "succeeded"
+
+
+def test_call_and_log_passes_visual_attachments_to_codex(
+    tmp_path, db_session: Session
+) -> None:
+    class ImageClient:
+        settings = type("SettingsStub", (), {"codex_model": "codex-test-model"})()
+
+        def __init__(self) -> None:
+            self.image_paths = None
+
+        def run(self, stage, prompt, on_event, image_paths=None):
+            self.image_paths = image_paths
+            return CodexRunResult(content="阶段输出", thread_id="thread-1", latency_ms=12)
+
+    image = tmp_path / "figure-1.png"
+    image.write_bytes(b"fake-png")
+    client = ImageClient()
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(user_id=alice.id, title="Codex 图片审计任务")
+    db_session.add(task)
+    db_session.commit()
+
+    result = call_and_log(
+        db=db_session,
+        task=task,
+        client=client,
+        stage="stage_two",
+        prompt="请执行第二阶段。",
+        image_paths=[image],
+    )
+
+    assert result.content == "阶段输出"
+    assert client.image_paths == [image]
