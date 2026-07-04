@@ -40,14 +40,14 @@ GET  /api/admin/patent-checks
 
 这些接口需要管理员账号登录态。普通用户访问会返回 `403`。
 
-## 模型调用失败
+## Codex 执行失败
 
 排查顺序：
 
-1. 确认 `.env` 中 `GPT_API_KEY` 已配置。
-2. 确认 ECS 可以访问 `GPT_BASE_URL`。
-3. 查看 `worker` 日志。
-4. 查看任务详情中的失败原因。
+1. 确认后端和 Worker 容器内可以执行 `CODEX_COMMAND`。
+2. 确认 `.env` 中 `CODEX_SKILL_PATH` 指向存在的 skill 文件。
+3. 确认 Codex 认证、模型和网络配置在容器运行环境中可用。
+4. 查看 `worker` 日志和任务详情中的 Codex 执行过程。
 
 按任务 ID 查看 Worker 日志：
 
@@ -55,24 +55,29 @@ GET  /api/admin/patent-checks
 docker compose logs worker | grep '<task_id>'
 ```
 
-查看模型调用审计记录：
+查看 Codex 阶段审计记录：
 
 ```bash
 docker compose exec -T postgres psql -U patent_user -d patent_check_agent \
   -c "select stage,status,error_message,latency_ms,created_at from model_call_logs where task_id='<task_id>' order by created_at;"
 ```
 
+查看 Codex 执行事件：
+
+```bash
+docker compose exec -T postgres psql -U patent_user -d patent_check_agent \
+  -c "select id,stage,event_type,message,created_at from patent_check_events where task_id='<task_id>' order by id;"
+```
+
 日志事件说明：
 
 - `patent_task_started`：Worker 开始处理任务。
-- `model_stage_started`：开始某个模型审查阶段。
-- `model_call_attempt_started`：开始一次模型 HTTP 调用。
-- `model_call_attempt_failed`：单次模型 HTTP 调用失败，包含错误类型和 HTTP 状态码。
-- `model_stage_failed`：某个阶段最终失败，并已写入审计表。
+- `codex_stage_started`：开始某个 Codex 审查阶段。
+- `codex_stage_failed`：某个阶段最终失败，并已写入审计表。
 - `patent_task_timeout`：任务超过 Worker 作业超时。
 - `patent_task_succeeded`：任务生成最终报告。
 
-日志中不得打印完整 API key 或完整专利文本。默认 Worker 作业超时由 `WORKER_JOB_TIMEOUT_SECONDS` 控制，应大于两阶段模型调用的最坏耗时。
+日志中不得打印完整认证信息或完整专利文本。默认 Worker 作业超时由 `WORKER_JOB_TIMEOUT_SECONDS` 控制，应大于两阶段 Codex 执行的最坏耗时。
 
 ## Docker Hub 拉取超时
 

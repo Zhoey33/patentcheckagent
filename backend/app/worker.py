@@ -13,9 +13,10 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
 from app.models.model_call_log import ModelCallLog
+from app.models.patent_check_event import PatentCheckEvent
 from app.models.patent_check_task import PROGRESS_STAGE_DEFAULTS, PatentCheckTask
+from app.services.codex_client import CodexClient, CodexEvent, CodexRunResult
 from app.services.errors import UserFacingError
-from app.services.model_client import ModelCallResult, ModelClient
 from app.services.prompt_loader import load_check_patent_prompt
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 STAGE_ONE_OUTPUT_INSTRUCTION = """
 输出要求：
 - 只输出第一阶段内容，不要输出说明书检查、附图检查或摘要检查。
+- 使用清晰 Markdown 结构，至少包含：
+  “### 审查结论”“### 主要问题”“### 技术特征分解与需说明书解释项清单”。
 - 问题项按严重程度排序，优先列出最关键的 8 项以内。
 - 《技术特征分解与需说明书解释项清单》应聚焦第二阶段必须核对的关键技术特征，原则上不超过 20 行。
 - 每个问题的建议修改保持可执行，但避免展开模板中的全部检查清单。
@@ -31,6 +34,8 @@ STAGE_ONE_OUTPUT_INSTRUCTION = """
 STAGE_TWO_OUTPUT_INSTRUCTION = """
 输出要求：
 - 只输出第二阶段、附图与摘要检查、总体评价。
+- 使用清晰 Markdown 结构，至少包含：
+  “### 审查结论”“### 权要特征-说明书解释对应检查表”“### 主要问题”“### 总体评价”。
 - 必须包含“权要特征-说明书解释对应检查表”。
 - 问题项按严重程度排序，优先列出最关键的 10 项以内。
 - 不要重复第一阶段完整报告，只引用需说明书解释项清单中的必要特征。
@@ -62,7 +67,7 @@ def run_patent_check_task(task_id: str) -> None:
         try:
             payload = load_process_text(task)
             prompt = load_check_patent_prompt()
-            client = ModelClient(settings)
+            client = CodexClient(settings, workspace=Path.cwd())
 
             set_task_progress(task, "stage_one", "正在执行第一阶段：权利要求书检查与特征分解。")
             db.commit()
@@ -71,7 +76,9 @@ def run_patent_check_task(task_id: str) -> None:
                 task=task,
                 client=client,
                 stage="stage_one",
-                messages=build_stage_one_messages(prompt, payload, task.technical_field),
+                prompt=format_messages_for_codex(
+                    build_stage_one_messages(prompt, payload, task.technical_field)
+                ),
             )
             task.stage_one_result = stage_one.content
             set_task_progress(
@@ -91,11 +98,13 @@ def run_patent_check_task(task_id: str) -> None:
                 task=task,
                 client=client,
                 stage="stage_two",
-                messages=build_stage_two_messages(
-                    prompt,
-                    payload,
-                    task.technical_field,
-                    stage_one.content,
+                prompt=format_messages_for_codex(
+                    build_stage_two_messages(
+                        prompt,
+                        payload,
+                        task.technical_field,
+                        stage_one.content,
+                    )
                 ),
             )
 
@@ -318,40 +327,44 @@ def set_task_progress(task: PatentCheckTask, stage: str, message: str) -> None:
 def call_and_log(
     db,
     task: PatentCheckTask,
-    client: ModelClient,
+    client: CodexClient,
     stage: str,
-    messages: list[dict[str, str]],
-) -> ModelCallResult:
-    """Call the model and persist an audit log row."""
+    prompt: str,
+) -> CodexRunResult:
+    """Run Codex and persist audit log plus user-visible execution events."""
 
-    logger.info("model_stage_started task_id=%s stage=%s", task.id, stage)
+    logger.info("codex_stage_started task_id=%s stage=%s", task.id, stage)
     try:
-        result = client.chat(messages)
+        result = client.run(
+            stage=stage,
+            prompt=prompt,
+            on_event=lambda event: persist_codex_event(db, task, event),
+        )
         db.add(
             ModelCallLog(
                 task_id=task.id,
-                model=client.settings.gpt_model,
+                model=get_codex_model_name(client),
                 stage=stage,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
+                input_tokens=None,
+                output_tokens=None,
                 latency_ms=result.latency_ms,
                 status="succeeded",
             )
         )
         db.commit()
         logger.info(
-            "model_stage_succeeded task_id=%s stage=%s latency_ms=%s output_tokens=%s",
+            "codex_stage_succeeded task_id=%s stage=%s latency_ms=%s thread_id=%s",
             task.id,
             stage,
             result.latency_ms,
-            result.output_tokens,
+            result.thread_id,
         )
         return result
     except UserFacingError as exc:
         db.add(
             ModelCallLog(
                 task_id=task.id,
-                model=client.settings.gpt_model,
+                model=get_codex_model_name(client),
                 stage=stage,
                 status="failed",
                 error_message=exc.message,
@@ -359,7 +372,7 @@ def call_and_log(
         )
         db.commit()
         logger.warning(
-            "model_stage_failed task_id=%s stage=%s error_type=%s message=%s",
+            "codex_stage_failed task_id=%s stage=%s error_type=%s message=%s",
             task.id,
             stage,
             type(exc).__name__,
@@ -371,7 +384,7 @@ def call_and_log(
         db.add(
             ModelCallLog(
                 task_id=task.id,
-                model=client.settings.gpt_model,
+                model=get_codex_model_name(client),
                 stage=stage,
                 status="failed",
                 error_message=message[:2000],
@@ -379,7 +392,7 @@ def call_and_log(
         )
         db.commit()
         logger.exception(
-            "model_stage_unexpected_failed task_id=%s stage=%s error_type=%s",
+            "codex_stage_unexpected_failed task_id=%s stage=%s error_type=%s",
             task.id,
             stage,
             type(exc).__name__,
@@ -387,11 +400,50 @@ def call_and_log(
         raise
 
 
+def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
+    """Persist one Codex execution event and surface it as current task progress."""
+
+    db.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage=event.stage,
+            event_type=event.event_type,
+            message=event.message,
+            raw_payload=json.dumps(event.raw_payload, ensure_ascii=False),
+        )
+    )
+    if event.event_type != "report_snapshot":
+        task.progress_message = event.message[:255]
+    db.commit()
+
+
+def get_codex_model_name(client: CodexClient) -> str:
+    """Return a stable model label for Codex audit rows."""
+
+    return getattr(client.settings, "codex_model", None) or "codex"
+
+
+def format_messages_for_codex(messages: list[dict[str, str]]) -> str:
+    """Convert chat-style stage messages into a single Codex task prompt."""
+
+    return "\n\n".join(
+        f"【{message['role']}】\n{message['content']}" for message in messages
+    ).strip()
+
+
 def normalize_final_report(stage_one: str, stage_two: str) -> str:
     """Combine model outputs into the PRD-required final Markdown report."""
 
-    normalized_stage_one = strip_report_title(stage_one)
-    normalized_stage_two = strip_report_title(stage_two)
+    normalized_stage_one = normalize_stage_body(
+        stage_one,
+        stage_heading="第一阶段：权利要求书检查与特征分解",
+        fallback_heading="第一阶段审查结果",
+    )
+    normalized_stage_two = normalize_stage_body(
+        stage_two,
+        stage_heading="第二阶段：说明书检查",
+        fallback_heading="第二阶段审查结果",
+    )
     return "\n\n".join(
         [
             "# 专利文件检查报告",
@@ -403,17 +455,48 @@ def normalize_final_report(stage_one: str, stage_two: str) -> str:
     )
 
 
-def strip_report_title(markdown: str) -> str:
-    """Remove duplicate top-level report titles from model stage output."""
+def normalize_stage_body(markdown: str, stage_heading: str, fallback_heading: str) -> str:
+    """Remove duplicate report/stage titles and ensure a useful Markdown subheading."""
+
+    lines = strip_leading_report_headings(markdown, stage_heading)
+    body = "\n".join(lines).strip()
+    if not body:
+        return f"### {fallback_heading}\n暂无阶段输出。"
+    if first_content_line(body).startswith("#"):
+        return body
+    return f"### {fallback_heading}\n{body}"
+
+
+def strip_leading_report_headings(markdown: str, stage_heading: str) -> list[str]:
+    """Remove repeated top-level and current-stage titles from the beginning."""
 
     lines = markdown.strip().splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
-    if lines and lines[0].strip() == "# 专利文件检查报告":
+    while lines and is_duplicate_report_heading(lines[0], stage_heading):
         lines.pop(0)
         while lines and not lines[0].strip():
             lines.pop(0)
-    return "\n".join(lines).strip()
+    return lines
+
+
+def is_duplicate_report_heading(line: str, stage_heading: str) -> bool:
+    """Return whether a leading line repeats a wrapper report heading."""
+
+    normalized = line.strip().lstrip("#").strip()
+    return normalized in {
+        "专利文件检查报告",
+        stage_heading,
+    }
+
+
+def first_content_line(markdown: str) -> str:
+    """Return the first non-empty line from a Markdown block."""
+
+    for line in markdown.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 def cleanup_task_inputs(db, task: PatentCheckTask) -> None:

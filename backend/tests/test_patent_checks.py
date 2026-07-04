@@ -15,8 +15,10 @@ from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.main import create_app
 from app.models.model_call_log import ModelCallLog
+from app.models.patent_check_event import PatentCheckEvent
 from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
+from app.services.codex_client import CodexEvent, CodexRunResult
 from app.services.patent_check_service import create_patent_check_task
 from app.worker import call_and_log, normalize_final_report, run_patent_check_task
 
@@ -259,6 +261,120 @@ def test_get_task_returns_progress_fields(client: TestClient, db_session: Sessio
     }
 
 
+def test_get_task_events_returns_codex_execution_history(
+    client: TestClient, db_session: Session
+) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(user_id=alice.id, title="Codex 事件任务")
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage="stage_one",
+            event_type="thread.started",
+            message="Codex 会话已启动。",
+            raw_payload='{"type":"thread.started","thread_id":"thread-1"}',
+        )
+    )
+    db_session.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage="stage_one",
+            event_type="event_msg",
+            message="第一阶段正在分析权利要求。",
+            raw_payload='{"type":"event_msg","payload":{"type":"agent_message"}}',
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    response = client.get(f"/api/patent-checks/{task.id}/events")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [event["message"] for event in payload["items"]] == [
+        "Codex 会话已启动。",
+        "第一阶段正在分析权利要求。",
+    ]
+    assert payload["items"][0]["stage"] == "stage_one"
+    assert payload["items"][0]["event_type"] == "thread.started"
+
+
+def test_stream_task_events_returns_sse_frames(client: TestClient, db_session: Session) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="Codex SSE 任务",
+        status="succeeded",
+        progress_stage="completed",
+        progress_percent=100,
+        progress_message="审查完成，报告已生成。",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage="stage_one",
+            event_type="thread.started",
+            message="Codex 会话已启动。",
+            raw_payload='{"type":"thread.started","thread_id":"thread-1"}',
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    with client.stream("GET", f"/api/patent-checks/{task.id}/events/stream") as response:
+        body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert "event: codex_event" in body
+    assert "Codex 会话已启动。" in body
+    assert "event: task_status" in body
+    assert '"status": "succeeded"' in body
+
+
+def test_stream_task_events_includes_report_snapshot_content(
+    client: TestClient, db_session: Session
+) -> None:
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="Codex 报告流任务",
+        status="succeeded",
+        progress_stage="completed",
+        progress_percent=100,
+        progress_message="审查完成，报告已生成。",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage="stage_one",
+            event_type="report_snapshot",
+            message="第一阶段报告内容已更新。",
+            raw_payload='{"type":"report_snapshot","content":"### 审查结论\\n- 存在问题"}',
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    events_response = client.get(f"/api/patent-checks/{task.id}/events")
+    with client.stream("GET", f"/api/patent-checks/{task.id}/events/stream") as stream_response:
+        body = stream_response.read().decode("utf-8")
+
+    assert events_response.status_code == 200
+    assert events_response.json()["items"][0]["content"] == "### 审查结论\n- 存在问题"
+    assert stream_response.status_code == 200
+    assert "event: report_snapshot" in body
+    assert '"content": "### 审查结论\\n- 存在问题"' in body
+
+
 def test_retry_failed_task_requires_available_process_text(
     client: TestClient, db_session: Session
 ) -> None:
@@ -282,6 +398,59 @@ def test_retry_failed_task_requires_available_process_text(
     assert "重新提交文件" in response.json()["detail"]
 
 
+def test_retry_failed_task_clears_stale_outputs_and_events(
+    tmp_path, client: TestClient, db_session: Session
+) -> None:
+    process_text_path = tmp_path / "task-input.json"
+    process_text_path.write_text(
+        '{"claims":"权利要求文本","specification":"说明书文本"}',
+        encoding="utf-8",
+    )
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(
+        user_id=alice.id,
+        title="带旧结果的失败任务",
+        status="failed",
+        process_text_path=str(process_text_path),
+        input_cleanup_status="retryable",
+        progress_stage="stage_two",
+        progress_percent=75,
+        progress_message="上一轮失败。",
+        stage_one_result="上一轮第一阶段结果",
+        final_report="# 上一轮报告",
+        error_message="上一轮错误。",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        PatentCheckEvent(
+            task_id=task.id,
+            stage="stage_one",
+            event_type="event_msg",
+            message="上一轮 Codex 事件。",
+            raw_payload='{"type":"event_msg"}',
+        )
+    )
+    db_session.commit()
+    login(client, "alice")
+
+    response = client.post(f"/api/patent-checks/{task.id}/retry")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "pending"
+    refreshed_task = db_session.get(PatentCheckTask, task.id)
+    assert refreshed_task is not None
+    assert refreshed_task.stage_one_result is None
+    assert refreshed_task.final_report is None
+    assert refreshed_task.error_message is None
+    remaining_event = db_session.scalar(
+        select(PatentCheckEvent).where(PatentCheckEvent.task_id == task.id)
+    )
+    assert remaining_event is None
+
+
 def test_normalize_final_report_keeps_stage_one_when_stage_two_has_title() -> None:
     report = normalize_final_report(
         "### 第一阶段发现\n- 权利要求缺少必要技术特征。",
@@ -295,10 +464,28 @@ def test_normalize_final_report_keeps_stage_one_when_stage_two_has_title() -> No
     assert "说明书支持不足" in report
 
 
+def test_normalize_final_report_removes_duplicate_stage_titles_and_adds_body_headings() -> None:
+    report = normalize_final_report(
+        "\n".join(
+            [
+                "## 第一阶段：权利要求书检查与特征分解",
+                "## 第一阶段：权利要求书检查与特征分解",
+                "- 权利要求1不清楚。",
+            ]
+        ),
+        "## 第二阶段：说明书检查\n第二阶段：说明书检查\n- 说明书缺少支持。",
+    )
+
+    assert report.count("## 第一阶段：权利要求书检查与特征分解") == 1
+    assert report.count("## 第二阶段：说明书检查") == 1
+    assert "### 第一阶段审查结果\n- 权利要求1不清楚。" in report
+    assert "### 第二阶段审查结果\n- 说明书缺少支持。" in report
+
+
 def test_failed_worker_task_can_be_retried_after_real_docx_upload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path))
     monkeypatch.setenv("ENABLE_WORKER_QUEUE", "false")
-    monkeypatch.setenv("GPT_API_KEY", "")
+    monkeypatch.setenv("CODEX_COMMAND", "/bin/false")
     get_settings.cache_clear()
     try:
         Base.metadata.drop_all(bind=engine)
@@ -336,9 +523,9 @@ def test_failed_worker_task_can_be_retried_after_real_docx_upload(monkeypatch, t
 
 def test_call_and_log_records_unexpected_model_exceptions(db_session: Session) -> None:
     class BrokenClient:
-        settings = type("SettingsStub", (), {"gpt_model": "test-model"})()
+        settings = type("SettingsStub", (), {"codex_model": "test-model"})()
 
-        def chat(self, messages):
+        def run(self, stage, prompt, on_event):
             raise RuntimeError("transport exploded")
 
     alice = db_session.scalar(select(User).where(User.username == "alice"))
@@ -353,7 +540,7 @@ def test_call_and_log_records_unexpected_model_exceptions(db_session: Session) -
             task=task,
             client=BrokenClient(),
             stage="stage_two",
-            messages=[{"role": "user", "content": "不会写入日志的完整文本"}],
+            prompt="不会写入日志的完整文本",
         )
     except RuntimeError:
         pass
@@ -364,3 +551,43 @@ def test_call_and_log_records_unexpected_model_exceptions(db_session: Session) -
     assert log.stage == "stage_two"
     assert "RuntimeError" in (log.error_message or "")
     assert "不会写入日志的完整文本" not in (log.error_message or "")
+
+
+def test_call_and_log_persists_codex_events(db_session: Session) -> None:
+    class EventClient:
+        settings = type("SettingsStub", (), {"codex_model": "codex-test-model"})()
+
+        def run(self, stage, prompt, on_event):
+            on_event(
+                CodexEvent(
+                    stage=stage,
+                    event_type="thread.started",
+                    message="Codex 会话已启动。",
+                    raw_payload={"type": "thread.started", "thread_id": "thread-1"},
+                )
+            )
+            return CodexRunResult(content="阶段输出", thread_id="thread-1", latency_ms=12)
+
+    alice = db_session.scalar(select(User).where(User.username == "alice"))
+    assert alice is not None
+    task = PatentCheckTask(user_id=alice.id, title="Codex 事件审计任务")
+    db_session.add(task)
+    db_session.commit()
+
+    result = call_and_log(
+        db=db_session,
+        task=task,
+        client=EventClient(),
+        stage="stage_one",
+        prompt="请执行第一阶段。",
+    )
+
+    event = db_session.scalar(select(PatentCheckEvent).where(PatentCheckEvent.task_id == task.id))
+    log = db_session.scalar(select(ModelCallLog).where(ModelCallLog.task_id == task.id))
+    assert result.content == "阶段输出"
+    assert event is not None
+    assert event.message == "Codex 会话已启动。"
+    assert event.raw_payload == '{"type": "thread.started", "thread_id": "thread-1"}'
+    assert log is not None
+    assert log.model == "codex-test-model"
+    assert log.status == "succeeded"

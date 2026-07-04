@@ -10,7 +10,7 @@ from app.db.base import Base
 
 
 class ModelCallLog(Base):
-    """Audit log for each GPT model call performed by the worker."""
+    """Audit log for each Codex stage performed by the worker."""
 
     __tablename__ = "model_call_logs"
 

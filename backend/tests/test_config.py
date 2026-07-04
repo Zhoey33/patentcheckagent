@@ -12,13 +12,15 @@ def test_settings_exposes_file_limits() -> None:
     assert settings.max_total_text_chars == 200000
 
 
-def test_settings_reads_gpt_environment(monkeypatch) -> None:
-    monkeypatch.setenv("GPT_BASE_URL", "https://example.test")
-    monkeypatch.setenv("GPT_API_KEY", "test-key")
-    monkeypatch.setenv("GPT_MODEL", "gpt-5.5")
+def test_settings_reads_codex_environment(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_COMMAND", "/usr/local/bin/codex")
+    monkeypatch.setenv("CODEX_SKILL_PATH", "skills/custom.md")
+    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "900")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5.5")
 
     settings = Settings()
 
-    assert settings.gpt_base_url == "https://example.test"
-    assert settings.gpt_api_key == "test-key"
-    assert settings.gpt_model == "gpt-5.5"
+    assert settings.codex_command == "/usr/local/bin/codex"
+    assert str(settings.codex_skill_path) == "skills/custom.md"
+    assert settings.codex_timeout_seconds == 900
+    assert settings.codex_model == "gpt-5.5"

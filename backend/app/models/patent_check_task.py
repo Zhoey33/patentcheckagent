@@ -70,6 +70,12 @@ class PatentCheckTask(Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
+    events = relationship(
+        "PatentCheckEvent",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="PatentCheckEvent.id",
+    )
 
     @property
     def progress_steps(self) -> list[dict[str, str]]:

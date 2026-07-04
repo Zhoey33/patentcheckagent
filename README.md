@@ -4,7 +4,7 @@
 
 仓库代号：`patentcheckagent`
 
-面向实验室内部使用的专利申请文件智能审查系统。系统支持固定账号登录、PDF/Word 文件上传、文本抽取、异步调用 GPT-5.5 审查模板、Markdown 报告展示与历史记录查询。
+面向实验室内部使用的专利申请文件智能审查系统。系统支持固定账号登录、PDF/Word 文件上传、文本抽取、异步调用 Codex 执行专利审查 skill、实时执行过程展示、Markdown 报告展示与历史记录查询。
 
 ## 技术栈
 
@@ -12,11 +12,12 @@
 - 后端：FastAPI、SQLAlchemy、Alembic、Pydantic
 - 异步任务：Redis、RQ
 - 数据库：PostgreSQL
+- 模型执行：Codex CLI + `skills/check-patent.md`
 - 部署：Docker Compose、Nginx
 
 ## 安全说明
 
-- 真实 API key 只允许写入本地或服务器 `.env`。
+- Codex 认证信息只允许保存在本地或服务器运行环境中。
 - `.env` 与 `llm_api.md` 已被 `.gitignore` 排除，不得提交到 GitHub。
 - 密码使用哈希存储，前端和接口响应不得暴露密钥、堆栈和服务器路径。
 
@@ -38,6 +39,7 @@ docker compose up --build
 
 - 认证：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
 - 审查任务：`POST /api/patent-checks`、`GET /api/patent-checks`、`GET /api/patent-checks/{task_id}`、`GET /api/patent-checks/{task_id}/report`、`POST /api/patent-checks/{task_id}/retry`
+- 执行事件：`GET /api/patent-checks/{task_id}/events`、`GET /api/patent-checks/{task_id}/events/stream`
 - 管理员：`GET /api/admin/users`、`POST /api/admin/users`、`PATCH /api/admin/users/{user_id}`、`POST /api/admin/users/{user_id}/reset-password`、`GET /api/admin/patent-checks`
 
 ## 上传规则

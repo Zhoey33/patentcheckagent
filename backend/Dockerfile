@@ -3,16 +3,31 @@
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
 FROM ${PYTHON_BASE_IMAGE}
 
+ARG CODEX_NPM_REGISTRY=https://registry.npmmirror.com
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i \
+        -e 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+        -e 's|http://deb.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+RUN npm install --global --registry=${CODEX_NPM_REGISTRY} @openai/codex \
+    && codex --version
 
 COPY backend/pyproject.toml /app/pyproject.toml
 COPY backend/app /app/app
 COPY backend/prompts /app/prompts
+COPY skills /app/skills
 COPY backend/alembic.ini /app/alembic.ini
 COPY backend/alembic /app/alembic
 

@@ -1,0 +1,14 @@
+# 这个文件用于为新子域名生成仅处理 ACME 校验的临时 HTTP Nginx 配置。
+
+server {
+    listen 80;
+    server_name __SERVER_NAMES__;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 302 https://$host$request_uri;
+    }
+}

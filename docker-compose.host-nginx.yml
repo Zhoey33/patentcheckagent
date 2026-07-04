@@ -1,0 +1,10 @@
+# 这个文件用于在已有宿主机 Nginx 的服务器上部署应用容器。
+
+services:
+  backend:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    ports: !override
+      - "127.0.0.1:3000:3000"

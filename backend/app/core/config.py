@@ -20,12 +20,16 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./patent_check_agent.sqlite3"
     redis_url: str = "redis://localhost:6379/0"
 
-    gpt_base_url: str = "https://helloapi.cc"
-    gpt_api_key: str = ""
-    gpt_model: str = "gpt-5.5"
-    gpt_timeout_seconds: int = 180
-    gpt_max_retries: int = 2
     worker_job_timeout_seconds: int = 1_800
+
+    codex_command: str = "codex"
+    codex_skill_path: Path = Path("skills/check-patent.md")
+    codex_timeout_seconds: int = 1_800
+    codex_model: str | None = None
+    codex_sandbox_mode: str = "danger-full-access"
+    gpt_base_url: str | None = None
+    gpt_api_key: str | None = None
+    gpt_model: str | None = None
 
     max_file_size_mb: int = 20
     max_task_files: int = 4
@@ -42,6 +46,11 @@ class Settings(BaseSettings):
     @field_validator("upload_dir", mode="before")
     @classmethod
     def normalize_upload_dir(cls, value: str | Path) -> Path:
+        return Path(value)
+
+    @field_validator("codex_skill_path", mode="before")
+    @classmethod
+    def normalize_codex_skill_path(cls, value: str | Path) -> Path:
         return Path(value)
 
 

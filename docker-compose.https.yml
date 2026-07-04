@@ -1,0 +1,9 @@
+# 这个文件用于在生产环境为 Nginx 增加 HTTPS 监听和证书挂载。
+
+services:
+  nginx:
+    volumes:
+      - ./deploy/nginx/asqmsl.cn.https.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    ports:
+      - "443:443"

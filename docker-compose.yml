@@ -32,6 +32,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        CODEX_NPM_REGISTRY: ${CODEX_NPM_REGISTRY:-https://registry.npmmirror.com}
     env_file:
       - .env
     environment:
@@ -58,6 +59,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        CODEX_NPM_REGISTRY: ${CODEX_NPM_REGISTRY:-https://registry.npmmirror.com}
     env_file:
       - .env
     environment:

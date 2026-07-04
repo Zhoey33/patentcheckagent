@@ -64,3 +64,19 @@ class PatentCheckReportRead(BaseModel):
     progress_steps: list[PatentCheckProgressStepRead]
     final_report: str | None
     error_message: str | None
+
+
+class PatentCheckEventRead(BaseModel):
+    id: int
+    task_id: str
+    stage: str
+    event_type: str
+    message: str
+    content: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PatentCheckEventList(BaseModel):
+    items: list[PatentCheckEventRead]

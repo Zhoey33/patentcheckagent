@@ -63,3 +63,17 @@ export type PatentCheckReport = {
   final_report: string | null;
   error_message: string | null;
 };
+
+export type PatentCheckEvent = {
+  id: number;
+  task_id: string;
+  stage: string;
+  event_type: string;
+  message: string;
+  content: string | null;
+  created_at: string;
+};
+
+export type PatentCheckEventList = {
+  items: PatentCheckEvent[];
+};
