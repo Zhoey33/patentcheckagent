@@ -21,8 +21,13 @@ import { AppShell } from "@/components/AppShell";
 import { StatusBadge } from "@/components/StatusBadge";
 import { API_BASE_URL, apiFetch, ApiError } from "@/lib/api";
 import { formatPatentEventMessage, formatPatentEventStage } from "@/lib/patentEvents";
-import type { PatentCheckEvent, PatentCheckEventList, PatentCheckReport, PatentCheckTask } from "@/lib/types";
-import type { PatentCheckTaskStatus } from "@/lib/types";
+import type {
+  PatentCheckEvent,
+  PatentCheckEventList,
+  PatentCheckReport,
+  PatentCheckTask,
+  PatentCheckTaskStatus
+} from "@/lib/types";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 const stepStyleMap: Record<string, { dot: string; text: string; line: string }> = {
@@ -78,8 +83,8 @@ function appendPatentEvent(current: PatentCheckEvent[], nextEvent: PatentCheckEv
 }
 
 function buildStreamingMarkdown(events: PatentCheckEvent[]) {
-  const stageOne = latestReportSnapshot(events, "stage_one");
-  const stageTwo = latestReportSnapshot(events, "stage_two");
+  const stageOne = getStreamingStageMarkdown(events, "stage_one");
+  const stageTwo = getStreamingStageMarkdown(events, "stage_two");
   if (!stageOne && !stageTwo) return "";
 
   const sections = ["# 专利文件检查报告"];
@@ -96,6 +101,14 @@ function buildStreamingMarkdown(events: PatentCheckEvent[]) {
     );
   }
   return sections.join("\n\n");
+}
+
+function getStreamingStageMarkdown(events: PatentCheckEvent[], stage: string) {
+  const deltas = events
+    .filter((event) => event.stage === stage && event.event_type === "report_delta" && event.content)
+    .map((event) => event.content || "");
+  if (deltas.length) return deltas.join("");
+  return latestReportSnapshot(events, stage);
 }
 
 function latestReportSnapshot(events: PatentCheckEvent[], stage: string) {
@@ -153,7 +166,9 @@ export default function TaskDetailPage() {
   const [eventError, setEventError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
   const [isEventStreamActive, setIsEventStreamActive] = useState(false);
+  const [playedStreamingMarkdown, setPlayedStreamingMarkdown] = useState("");
   const lastEventIdRef = useRef(0);
+  const reportContainerRef = useRef<HTMLDivElement | null>(null);
 
   const shouldPoll = isActiveStatus(task?.status);
   const canCancel = isActiveStatus(task?.status);
@@ -238,6 +253,7 @@ export default function TaskDetailPage() {
     }
 
     source.addEventListener("codex_event", (message) => handleEvent(message as MessageEvent));
+    source.addEventListener("report_delta", (message) => handleEvent(message as MessageEvent));
     source.addEventListener("report_snapshot", (message) => handleEvent(message as MessageEvent));
 
     source.addEventListener("task_status", (message) => {
@@ -263,14 +279,39 @@ export default function TaskDetailPage() {
   }, [shouldPoll, id]);
 
   const timelineEvents = useMemo(
-    () => events.filter((event) => event.event_type !== "report_snapshot"),
+    () => events.filter((event) => !["report_snapshot", "report_delta"].includes(event.event_type)),
     [events]
   );
   const streamingMarkdown = useMemo(() => buildStreamingMarkdown(events), [events]);
+
+  useEffect(() => {
+    if (report?.final_report || !streamingMarkdown) {
+      setPlayedStreamingMarkdown("");
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setPlayedStreamingMarkdown((current) => {
+        const prefix = streamingMarkdown.startsWith(current) ? current : "";
+        if (prefix.length >= streamingMarkdown.length) {
+          window.clearInterval(timer);
+          return prefix;
+        }
+        return streamingMarkdown.slice(0, Math.min(streamingMarkdown.length, prefix.length + 24));
+      });
+    }, 35);
+    return () => window.clearInterval(timer);
+  }, [report?.final_report, streamingMarkdown]);
+
   const markdown = useMemo(
-    () => normalizeMarkdownForDisplay(report?.final_report || streamingMarkdown),
-    [report, streamingMarkdown]
+    () => normalizeMarkdownForDisplay(report?.final_report || playedStreamingMarkdown),
+    [report, playedStreamingMarkdown]
   );
+
+  useEffect(() => {
+    if (!report?.final_report && reportContainerRef.current) {
+      reportContainerRef.current.scrollTop = reportContainerRef.current.scrollHeight;
+    }
+  }, [markdown, report?.final_report]);
 
   async function copyReport() {
     if (markdown) {
@@ -490,7 +531,7 @@ export default function TaskDetailPage() {
           ) : null}
         </div>
         {markdown ? (
-          <div className="markdown-body max-h-[72vh] overflow-auto">
+          <div ref={reportContainerRef} className="markdown-body max-h-[72vh] overflow-auto">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
           </div>
         ) : (
