@@ -76,8 +76,6 @@ class CodexClient:
                 thread_id = next_thread_id
             if event:
                 on_event(event)
-                if event.event_type == "report_delta" and event.content:
-                    final_message += event.content
             if next_final:
                 final_message = next_final
                 if next_final != last_report_snapshot:
@@ -273,9 +271,6 @@ def parse_codex_event(stage: str, line: str) -> tuple[CodexEvent | None, str | N
 
     event_type = str(payload.get("type") or "unknown")
     thread_id = payload.get("thread_id") if event_type == "thread.started" else None
-    delta = extract_text_delta(payload)
-    if delta:
-        return build_report_delta_event(stage, delta, payload), thread_id, None
     final_message = extract_final_message(payload)
     if final_message and is_assistant_content_event(payload):
         return None, thread_id, final_message
@@ -287,41 +282,6 @@ def parse_codex_event(stage: str, line: str) -> tuple[CodexEvent | None, str | N
         raw_payload=payload,
     )
     return event, thread_id, final_message
-
-
-def extract_text_delta(payload: dict[str, Any]) -> str | None:
-    """Extract assistant text delta from known Codex or Responses-style JSON events."""
-
-    candidates = [payload]
-    inner = payload.get("payload")
-    if isinstance(inner, dict):
-        candidates.append(inner)
-    for candidate in candidates:
-        candidate_type = str(candidate.get("type") or "")
-        if "delta" not in candidate_type:
-            continue
-        if not is_text_delta_type(candidate_type):
-            continue
-        for key in ("delta", "text", "content"):
-            value = candidate.get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
-
-
-def is_text_delta_type(event_type: str) -> bool:
-    """Return whether a JSON event type represents assistant text delta."""
-
-    return any(
-        marker in event_type
-        for marker in (
-            "output_text.delta",
-            "text_delta",
-            "message_delta",
-            "agent_message_delta",
-            "content.delta",
-        )
-    )
 
 
 def describe_codex_event(stage: str, payload: dict[str, Any]) -> str:
@@ -460,22 +420,6 @@ def build_report_snapshot_event(stage: str, content: str) -> CodexEvent:
         event_type="report_snapshot",
         message=f"{stage_name}报告内容已更新。",
         raw_payload={"type": "report_snapshot", "content": content},
-        content=content,
-    )
-
-
-def build_report_delta_event(stage: str, content: str, payload: dict[str, Any]) -> CodexEvent:
-    """Build a non-timeline event carrying incremental Markdown text."""
-
-    stage_name = {
-        "stage_one": "第一阶段",
-        "stage_two": "第二阶段",
-    }.get(stage, "阶段")
-    return CodexEvent(
-        stage=stage,
-        event_type="report_delta",
-        message=f"{stage_name}报告内容正在生成。",
-        raw_payload={"type": "report_delta", "content": content, "source": payload},
         content=content,
     )
 

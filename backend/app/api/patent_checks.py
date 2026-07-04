@@ -160,7 +160,7 @@ async def stream_task_events(
             for event in events:
                 last_id = event.id
                 yield format_sse(
-                    get_sse_event_name(event),
+                    "report_snapshot" if event.event_type == "report_snapshot" else "codex_event",
                     serialize_event(event),
                     event_id=event.id,
                 )
@@ -226,14 +226,6 @@ def build_task_status_payload(task: PatentCheckTask) -> dict:
         "progress_steps": task.progress_steps,
         "error_message": task.error_message,
     }
-
-
-def get_sse_event_name(event: PatentCheckEvent) -> str:
-    """Return the SSE event channel for one persisted Codex event."""
-
-    if event.event_type in {"report_snapshot", "report_delta"}:
-        return event.event_type
-    return "codex_event"
 
 
 def format_sse(event: str, payload: dict, event_id: int | None = None) -> str:

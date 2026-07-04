@@ -30,9 +30,9 @@ class PatentCheckEvent(Base):
 
     @property
     def content(self) -> str | None:
-        """Return streamed Markdown content carried by report events."""
+        """Return streamed Markdown content carried by report snapshot events."""
 
-        if self.event_type not in {"report_snapshot", "report_delta"} or not self.raw_payload:
+        if self.event_type != "report_snapshot" or not self.raw_payload:
             return None
         try:
             payload = json.loads(self.raw_payload)

@@ -414,44 +414,6 @@ def test_stream_task_events_includes_report_snapshot_content(
     assert '"content": "### 审查结论\\n- 存在问题"' in body
 
 
-def test_stream_task_events_includes_report_delta_content(
-    client: TestClient, db_session: Session
-) -> None:
-    alice = db_session.scalar(select(User).where(User.username == "alice"))
-    assert alice is not None
-    task = PatentCheckTask(
-        user_id=alice.id,
-        title="Codex 增量报告流任务",
-        status="succeeded",
-        progress_stage="completed",
-        progress_percent=100,
-        progress_message="审查完成，报告已生成。",
-    )
-    db_session.add(task)
-    db_session.flush()
-    db_session.add(
-        PatentCheckEvent(
-            task_id=task.id,
-            stage="stage_one",
-            event_type="report_delta",
-            message="第一阶段报告内容正在生成。",
-            raw_payload='{"type":"report_delta","content":"### 审查结论"}',
-        )
-    )
-    db_session.commit()
-    login(client, "alice")
-
-    events_response = client.get(f"/api/patent-checks/{task.id}/events")
-    with client.stream("GET", f"/api/patent-checks/{task.id}/events/stream") as stream_response:
-        body = stream_response.read().decode("utf-8")
-
-    assert events_response.status_code == 200
-    assert events_response.json()["items"][0]["content"] == "### 审查结论"
-    assert stream_response.status_code == 200
-    assert "event: report_delta" in body
-    assert '"content": "### 审查结论"' in body
-
-
 def test_task_status_payload_includes_progress_steps(db_session: Session) -> None:
     alice = db_session.scalar(select(User).where(User.username == "alice"))
     assert alice is not None

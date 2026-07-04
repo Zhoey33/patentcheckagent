@@ -259,46 +259,6 @@ def test_codex_client_treats_agent_messages_as_content_snapshots() -> None:
     assert final_message == "# 第一阶段报告"
 
 
-def test_codex_client_treats_output_text_delta_as_report_delta() -> None:
-    event, _, final_message = parse_codex_event(
-        "stage_one",
-        '{"type":"response.output_text.delta","delta":"### 审查结论"}',
-    )
-
-    assert event is not None
-    assert event.event_type == "report_delta"
-    assert event.content == "### 审查结论"
-    assert final_message is None
-
-
-def test_codex_client_can_finish_from_report_deltas(tmp_path: Path) -> None:
-    skill = tmp_path / "check-patent.md"
-    skill.write_text("# 专利检查 Skill", encoding="utf-8")
-    process = FakeCodexProcess(
-        [
-            '{"type":"thread.started","thread_id":"thread-1"}',
-            '{"type":"response.output_text.delta","delta":"# 阶段报告\\n"}',
-            '{"type":"response.output_text.delta","delta":"- 逐字生成"}',
-            '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}',
-        ]
-    )
-    captured_events = []
-    client = CodexClient(
-        Settings(
-            app_secret_key="test-secret-key-with-at-least-32-bytes",
-            codex_skill_path=skill,
-            codex_command="codex",
-        ),
-        popen_factory=lambda *args, **kwargs: process,
-    )
-
-    result = client.run(stage="stage_one", prompt="请审查。", on_event=captured_events.append)
-
-    assert result.content == "# 阶段报告\n- 逐字生成"
-    deltas = [event.content for event in captured_events if event.event_type == "report_delta"]
-    assert deltas == ["# 阶段报告\n", "- 逐字生成"]
-
-
 def test_codex_client_ignores_agent_process_chatter_until_report(tmp_path: Path) -> None:
     skill = tmp_path / "check-patent.md"
     skill.write_text("# 专利检查 Skill", encoding="utf-8")
