@@ -204,10 +204,13 @@ def test_file_tool_outputs_are_not_retained_as_process_text(db_session):
             message="读取完成",
             raw_payload={
                 "type": "item.completed",
+                "elapsed_ms": 250,
                 "item": {
                     "type": "command_execution",
                     "status": "completed",
                     "exit_code": 0,
+                    "duration_ms": 20,
+                    "output_chars": 24,
                     "command": "read input",
                     "aggregated_output": "private document content",
                 },
@@ -217,3 +220,8 @@ def test_file_tool_outputs_are_not_retained_as_process_text(db_session):
     saved = db_session.scalar(select(PatentCheckEvent).where(PatentCheckEvent.task_id == task.id))
     assert "private document content" not in saved.raw_payload
     assert json.loads(saved.raw_payload)["item"]["exit_code"] == 0
+    payload = json.loads(saved.raw_payload)
+    assert payload["elapsed_ms"] == 250
+    assert payload["item"]["duration_ms"] == 20
+    assert payload["item"]["output_chars"] == 24
+    assert "command" not in payload["item"]
