@@ -23,6 +23,7 @@ IP 部署覆盖文件使用 Debian、PyPI 和 npm 官方软件源，避免香港
 GPT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 GPT_MODEL=qwen3.8-flash
 CODEX_MODEL=qwen3.8-flash
+CODEX_REASONING_EFFORT=low
 CODEX_TIMEOUT_SECONDS=600
 ```
 

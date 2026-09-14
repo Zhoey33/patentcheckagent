@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-import select
+import queue
 import signal
 import subprocess
 import threading
@@ -33,6 +33,7 @@ class CodexRunResult:
     content: str
     thread_id: str | None
     latency_ms: int
+    usage: dict[str, int] | None = None
 
 
 class CodexClient:
@@ -71,6 +72,8 @@ class CodexClient:
         final_message = ""
         last_report_snapshot = ""
         stderr_lines: list[str] = []
+        usage: dict[str, int] = {}
+        tool_starts: dict[str, float] = {}
 
         def handle_stdout_line(line: str) -> None:
             nonlocal thread_id, final_message, last_report_snapshot
@@ -78,6 +81,18 @@ class CodexClient:
             if next_thread_id:
                 thread_id = next_thread_id
             if event:
+                event.raw_payload["elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
+                if event.event_type == "turn.completed":
+                    usage.update(event.raw_payload.get("usage") or {})
+                item = event.raw_payload.get("item") or {}
+                if item.get("type") == "command_execution":
+                    if event.event_type == "item.started":
+                        tool_starts[item["id"]] = time.perf_counter()
+                    elif event.event_type == "item.completed":
+                        tool_start = tool_starts.pop(item["id"], None)
+                        if tool_start is not None:
+                            item["duration_ms"] = int((time.perf_counter() - tool_start) * 1000)
+                        item["output_chars"] = len(item.get("aggregated_output") or "")
                 on_event(event)
             if next_final:
                 final_message = next_final
@@ -113,7 +128,7 @@ class CodexClient:
                     handle_stdout_line(line)
                 returncode = getattr(process, "returncode", 0)
                 return self._finish_run(
-                    returncode, stderr_text, final_message, thread_id, started_at
+                    returncode, stderr_text, final_message, thread_id, started_at, usage
                 )
 
             stderr_thread = drain_stream(getattr(process, "stderr", None), stderr_lines)
@@ -137,7 +152,9 @@ class CodexClient:
             raise
 
         stderr_text = "\n".join(stderr_lines)
-        return self._finish_run(returncode, stderr_text, final_message, thread_id, started_at)
+        return self._finish_run(
+            returncode, stderr_text, final_message, thread_id, started_at, usage
+        )
 
     def _finish_run(
         self,
@@ -146,6 +163,7 @@ class CodexClient:
         final_message: str,
         thread_id: str | None,
         started_at: float,
+        usage: dict[str, int],
     ) -> CodexRunResult:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         if returncode != 0:
@@ -161,6 +179,7 @@ class CodexClient:
             content=final_message.strip(),
             thread_id=thread_id,
             latency_ms=latency_ms,
+            usage=usage,
         )
 
     def _resolve_skill_path(self) -> Path:
@@ -180,6 +199,7 @@ class CodexClient:
         effective_model = self.settings.codex_model or self.settings.gpt_model
         if effective_model:
             command.extend(["-m", effective_model])
+        command.extend(["-c", f'model_reasoning_effort="{self.settings.codex_reasoning_effort}"'])
         command.extend(self._build_provider_config_args())
         command.append("exec")
         for image_path in image_paths or []:
@@ -413,24 +433,37 @@ def read_stdout_with_timeout(
 ) -> None:
     """Read subprocess stdout without letting an open pipe bypass the total timeout."""
 
-    stdout = process.stdout
+    # TextIOWrapper may buffer several JSON lines after one OS read. A blocking
+    # reader also handles partial lines while the main thread enforces the deadline.
+    lines: queue.Queue[str | Exception | None] = queue.Queue()
+
+    def read_lines() -> None:
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        except Exception as exc:
+            lines.put(exc)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=read_lines, daemon=True).start()
     while True:
         elapsed = time.perf_counter() - started_at
         remaining = timeout_seconds - elapsed
         if remaining <= 0:
             raise subprocess.TimeoutExpired(getattr(process, "args", "codex"), timeout_seconds)
 
-        ready, _, _ = select.select([stdout], [], [], min(1.0, remaining))
-        if ready:
-            line = stdout.readline()
-            if line:
-                on_line(line)
-                continue
-
-        if process.poll() is not None:
-            for line in stdout:
-                on_line(line)
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty as exc:
+            raise subprocess.TimeoutExpired(
+                getattr(process, "args", "codex"), timeout_seconds
+            ) from exc
+        if line is None:
             return
+        if isinstance(line, Exception):
+            raise line
+        on_line(line)
 
 
 def build_report_snapshot_event(stage: str, content: str) -> CodexEvent:

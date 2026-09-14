@@ -196,7 +196,10 @@ def retry_task(
     task.progress_percent = 5
     task.progress_message = "任务已重新提交，等待审查队列调度。"
     task.error_message = None
-    task.stage_one_result = None
+    # Original files and the skill snapshot are immutable for a task. This field
+    # is written only after stage one succeeds, so it is a reusable checkpoint.
+    if not task.skill_snapshot:
+        task.stage_one_result = None
     task.final_report = None
     task.started_at = None
     task.finished_at = None

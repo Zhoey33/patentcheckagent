@@ -18,7 +18,7 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         /etc/apt/sources.list.d/debian.sources; \
     fi \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates nodejs npm \
+    && apt-get install -y --no-install-recommends ca-certificates nodejs npm unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip config set global.index-url "${PIP_INDEX_URL}"

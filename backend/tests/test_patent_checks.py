@@ -775,6 +775,7 @@ def test_call_and_log_records_unexpected_model_exceptions(db_session: Session) -
     assert log is not None
     assert log.status == "failed"
     assert log.stage == "stage_two"
+    assert log.latency_ms is not None
     assert "RuntimeError" in (log.error_message or "")
     assert "不会写入日志的完整文本" not in (log.error_message or "")
 
@@ -792,7 +793,10 @@ def test_call_and_log_persists_codex_events(db_session: Session) -> None:
                     raw_payload={"type": "thread.started", "thread_id": "thread-1"},
                 )
             )
-            return CodexRunResult(content="阶段输出", thread_id="thread-1", latency_ms=12)
+            return CodexRunResult(
+                content="阶段输出", thread_id="thread-1", latency_ms=12,
+                usage={"input_tokens": 100, "output_tokens": 20},
+            )
 
     alice = db_session.scalar(select(User).where(User.username == "alice"))
     assert alice is not None
@@ -817,6 +821,7 @@ def test_call_and_log_persists_codex_events(db_session: Session) -> None:
     assert log is not None
     assert log.model == "codex-test-model"
     assert log.status == "succeeded"
+    assert log.input_tokens == 100 and log.output_tokens == 20
 
 
 def test_call_and_log_passes_visual_attachments_to_codex(tmp_path, db_session: Session) -> None:
@@ -850,3 +855,56 @@ def test_call_and_log_passes_visual_attachments_to_codex(tmp_path, db_session: S
 
     assert result.content == "阶段输出"
     assert client.image_paths == [image]
+
+
+def test_retry_resumes_completed_stage_with_same_skill_and_originals(
+    client, db_session, monkeypatch,
+):
+    from sqlalchemy.orm import sessionmaker
+
+    from app import worker
+    from app.services.errors import UserFacingError
+
+    calls = []
+
+    class StageClient:
+        def __init__(self, settings, workspace, isolated):
+            self.settings = settings
+            self.workspace = workspace
+
+        def run(self, stage, prompt, on_event, image_paths=None):
+            calls.append(stage)
+            if stage == "stage_one":
+                return CodexRunResult("# 第一阶段\nC1-F1：处理输入", None, 8)
+            assert (self.workspace / "stage-one.md").read_text().endswith("C1-F1：处理输入")
+            assert (self.workspace / "inputs/specification.docx").is_file()
+            if calls.count("stage_two") == 1:
+                raise UserFacingError("Codex 执行超时", 504)
+            return CodexRunResult("# 第二阶段\nC1-F1：已支持", None, 9)
+
+    monkeypatch.setattr(worker, "CodexClient", StageClient)
+    monkeypatch.setattr(worker, "SessionLocal", sessionmaker(bind=db_session.get_bind()))
+    login(client)
+    created = client.post(
+        "/api/patent-checks", data={"title": "分阶段重试"},
+        files={
+            "claims": real_docx_file("claims.docx", "权1：处理输入"),
+            "specification": real_docx_file("specification.docx", "处理输入的说明"),
+        },
+    )
+    task_id = created.json()["id"]
+    worker.run_patent_check_task(task_id)
+    db_session.expire_all()
+    task = db_session.get(PatentCheckTask, task_id)
+    snapshot = task.skill_snapshot
+    assert task.status == "failed" and task.stage_one_result
+    assert client.post(f"/api/patent-checks/{task_id}/retry").status_code == 200
+    worker.run_patent_check_task(task_id)
+    db_session.expire_all()
+    task = db_session.get(PatentCheckTask, task_id)
+    assert task.status == "succeeded"
+    assert task.skill_snapshot == snapshot
+    assert calls == ["stage_one", "stage_two", "stage_two"]
+    assert "C1-F1：处理输入" in task.final_report and "C1-F1：已支持" in task.final_report
+    assert all(f.stored_path is None for f in task.files)
+    assert any(e.event_type == "stage_reused" for e in task.events)

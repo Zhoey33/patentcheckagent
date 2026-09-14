@@ -3,6 +3,7 @@
 import json
 import logging
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -64,15 +65,25 @@ def run_patent_check_task(task_id: str) -> None:
                 client_settings = settings.model_copy(update={"codex_skill_path": skill_path})
                 client = CodexClient(client_settings, workspace=workspace, isolated=True)
 
-                set_task_progress(task, "stage_one", "正在读取权利要求原文件并执行所选 Skill。")
-                db.commit()
-                stage_one = call_and_log(
-                    db,
-                    task,
-                    client,
-                    "stage_one",
-                    build_file_review_prompt("stage_one", file_paths, task.technical_field),
-                )
+                if task.stage_one_result:
+                    stage_one = CodexRunResult(task.stage_one_result, None, 0)
+                    persist_codex_event(
+                        db, task, CodexEvent(
+                            "stage_one", "stage_reused",
+                            "已复用完成的第一阶段报告，继续第二阶段。",
+                            {"type": "stage_reused"},
+                        )
+                    )
+                else:
+                    set_task_progress(task, "stage_one", "正在读取权利要求原文件并执行所选 Skill。")
+                    db.commit()
+                    stage_one = call_and_log(
+                        db,
+                        task,
+                        client,
+                        "stage_one",
+                        build_file_review_prompt("stage_one", file_paths, task.technical_field),
+                    )
                 ensure_task_not_cancelled(db, task)
                 task.stage_one_result = stage_one.content
                 (workspace / "stage-one.md").write_text(stage_one.content, encoding="utf-8")
@@ -209,6 +220,7 @@ def call_and_log(
     """Run Codex and persist audit log plus user-visible execution events."""
 
     logger.info("codex_stage_started task_id=%s stage=%s", task.id, stage)
+    started_at = time.perf_counter()
     try:
         result = client.run(
             stage=stage,
@@ -221,8 +233,8 @@ def call_and_log(
                 task_id=task.id,
                 model=get_codex_model_name(client),
                 stage=stage,
-                input_tokens=None,
-                output_tokens=None,
+                input_tokens=(result.usage or {}).get("input_tokens"),
+                output_tokens=(result.usage or {}).get("output_tokens"),
                 latency_ms=result.latency_ms,
                 status="succeeded",
             )
@@ -243,6 +255,7 @@ def call_and_log(
                 model=get_codex_model_name(client),
                 stage=stage,
                 status="failed",
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
                 error_message=exc.message,
             )
         )
@@ -263,6 +276,7 @@ def call_and_log(
                 model=get_codex_model_name(client),
                 stage=stage,
                 status="failed",
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
                 error_message=message[:2000],
             )
         )
@@ -283,7 +297,7 @@ def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
     # File tools can return entire documents; retain status metadata and report snapshots only.
     raw_payload = {
         key: event.raw_payload[key]
-        for key in ("type", "thread_id", "usage")
+        for key in ("type", "thread_id", "usage", "elapsed_ms")
         if key in event.raw_payload
     }
     if event.event_type == "report_snapshot":
@@ -291,7 +305,9 @@ def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
     elif isinstance(event.raw_payload.get("item"), dict):
         item = event.raw_payload["item"]
         raw_payload["item"] = {
-            key: item[key] for key in ("id", "type", "status", "exit_code") if key in item
+            key: item[key]
+            for key in ("id", "type", "status", "exit_code", "duration_ms", "output_chars")
+            if key in item
         }
     db.add(
         PatentCheckEvent(
@@ -310,7 +326,11 @@ def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
 def get_codex_model_name(client: CodexClient) -> str:
     """Return a stable model label for Codex audit rows."""
 
-    return getattr(client.settings, "codex_model", None) or "codex"
+    return (
+        getattr(client.settings, "codex_model", None)
+        or getattr(client.settings, "gpt_model", None)
+        or "codex"
+    )
 
 
 def normalize_final_report(stage_one: str, stage_two: str) -> str:

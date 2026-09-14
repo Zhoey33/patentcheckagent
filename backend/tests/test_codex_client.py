@@ -126,6 +126,7 @@ def test_codex_client_configures_openai_compatible_provider_from_gpt_settings(
     assert "gpt-5.5" in process.args
     assert '-c' in process.args
     assert 'model_provider="patent-check-gpt"' in process.args
+    assert 'model_reasoning_effort="low"' in process.args
     assert 'model_providers.patent-check-gpt.base_url="https://helloapi.cc/v1"' in process.args
     assert 'model_providers.patent-check-gpt.env_key="CODEX_API_KEY"' in process.args
     assert 'model_providers.patent-check-gpt.wire_api="responses"' in process.args
@@ -220,6 +221,7 @@ def test_codex_client_extracts_final_message_from_item_completed_agent_message(
     result = client.run(stage="stage_one", prompt="请审查。", on_event=lambda event: None)
 
     assert result.content == "# 阶段报告\n- 新版 Codex 输出"
+    assert result.usage == {"input_tokens": 10, "output_tokens": 5}
 
 
 def test_codex_client_describes_events_with_user_readable_stage_messages() -> None:
@@ -341,11 +343,12 @@ def test_codex_client_streams_report_snapshots_without_duplicate_ready_events(
     ]
 
 
-def test_codex_client_enforces_timeout_while_stdout_pipe_is_open(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ["", "printf 'partial JSON without newline'\n"])
+def test_codex_client_enforces_timeout_while_stdout_pipe_is_open(tmp_path: Path, prefix) -> None:
     skill = tmp_path / "check-patent.md"
     skill.write_text("# 专利检查 Skill", encoding="utf-8")
     script = tmp_path / "slow-codex"
-    script.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    script.write_text(f"#!/bin/sh\n{prefix}sleep 5\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     client = CodexClient(
         Settings(
@@ -361,6 +364,24 @@ def test_codex_client_enforces_timeout_while_stdout_pipe_is_open(tmp_path: Path)
         client.run(stage="stage_one", prompt="请审查。", on_event=lambda event: None)
 
     assert time.perf_counter() - started_at < 3
+
+
+def test_codex_client_delivers_buffered_events_before_process_finishes(tmp_path: Path) -> None:
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("# 审查")
+    script = tmp_path / "burst-codex"
+    script.write_text(
+        "#!/bin/sh\nprintf '%s\\n' "
+        "'{\"type\":\"turn.started\"}' '{\"type\":\"turn.completed\"}'\nsleep 5\n"
+    )
+    script.chmod(0o700)
+    events = []
+    client = CodexClient(Settings(
+        codex_command=str(script), codex_skill_path=skill, codex_timeout_seconds=1,
+    ))
+    with pytest.raises(UserFacingError, match="Codex 执行超时"):
+        client.run("stage_one", "审查", events.append)
+    assert [e.event_type for e in events] == ["turn.started", "turn.completed"]
 
 
 def test_codex_client_maps_nonzero_exit_to_user_facing_error(tmp_path: Path) -> None:

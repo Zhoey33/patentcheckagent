@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     codex_skill_path: Path = Path("skills/check-patent/SKILL.md")
     codex_timeout_seconds: int = 600
     codex_model: str | None = None
+    codex_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
     codex_sandbox_mode: str = "workspace-write"
     gpt_base_url: str | None = None
     gpt_api_key: str | None = None
