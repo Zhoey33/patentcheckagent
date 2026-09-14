@@ -88,3 +88,14 @@ sudo docker compose -f docker-compose.yml -f docker-compose.ip.yml logs --tail=1
 升级先备份数据库，并确认没有运行中任务；更新后端和前端镜像后执行 `up -d`。后端自动运行 `20260914_0004` 迁移，创建 Skill 表和任务快照列，并初始化内置规则。不要手工删除旧表或历史任务。
 
 Worker 所需 seccomp 文件 `deploy/codex-seccomp.json` 必须随 Compose 文件一起更新。它允许创建 Codex 沙箱所需的命名空间操作；任务自身仍采用仅访问当前工作目录、禁止文件工具联网的权限配置。Codex 超时时限提升至每阶段 600 秒。管理员登录后可在 `/skills` 修改规则；已有数据库规则不会被后续镜像更新覆盖。
+
+
+### 本次升级验收结果
+
+- `20260914_0004` 迁移完成，六个服务启动正常，公网 HTTPS 健康检查通过。
+- `/skills`、`/workspace`、登录页和引用的 JavaScript 可访问，图片优化接口正常。前端构建通过，生产依赖审计为 0 项漏洞。
+- Skill 初始化、新建、读取、编辑、停用、删除、乐观版本控制和管理员权限校验通过。默认 Skill 已经由 API 更新至 v2，持久化编辑不会被重启覆盖。
+- 两页扫描 PDF（无文字层）及 Word 原文件的完整审查任务成功，编号 `1d69c40f-91b7-4b41-b94e-8f2d8c758a98`；任务使用提交时的 v1 快照，后续内容修正见 `docs/skill-review.md`。
+- 当前目录可读、相邻任务文件不可读的真实沙箱检查通过；报告及 SSE、其他用户隔离、原文件和工作目录清理均通过。
+- 升级前备份位于 `/opt/patent-check-backups/skills-mbt9K5`；旧镜像保留为 `patent-check-backend:before-skills` 和 `patent-check-frontend:before-skills`。新增表/列兼容旧代码，回滚镜像不需要删除新表。
+- 浏览器自动化创建标签页持续超时，未完成真实浏览器中的交互与视觉验收；本次已完成 API、HTML/静态资源和构建检查。
