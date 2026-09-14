@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import select
+import signal
 import subprocess
 import threading
 import time
@@ -42,10 +43,12 @@ class CodexClient:
         settings: Settings,
         popen_factory: Callable[..., Any] = subprocess.Popen,
         workspace: Path | None = None,
+        isolated: bool = False,
     ) -> None:
         self.settings = settings
         self.popen_factory = popen_factory
         self.workspace = workspace or Path.cwd()
+        self.isolated = isolated
 
     def run(
         self,
@@ -92,6 +95,7 @@ class CodexClient:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
+                start_new_session=True,
             )
         except OSError as exc:
             raise UserFacingError("Codex 命令不可用，请联系系统管理员检查部署环境。", 500) from exc
@@ -125,8 +129,12 @@ class CodexClient:
             if stderr_thread:
                 stderr_thread.join(timeout=1)
         except subprocess.TimeoutExpired as exc:
-            process.kill()
+            stop_process_group(process)
             raise UserFacingError("Codex 执行超时，请稍后重试。", 504) from exc
+        except BaseException:
+            if getattr(process, "returncode", None) is None:
+                stop_process_group(process)
+            raise
 
         stderr_text = "\n".join(stderr_lines)
         return self._finish_run(returncode, stderr_text, final_message, thread_id, started_at)
@@ -181,8 +189,7 @@ class CodexClient:
                 "--json",
                 "--ephemeral",
                 "--skip-git-repo-check",
-                "--sandbox",
-                self.settings.codex_sandbox_mode,
+                *([] if self.isolated else ["--sandbox", self.settings.codex_sandbox_mode]),
                 "-C",
                 str(self.workspace),
                 "-",
@@ -211,6 +218,23 @@ class CodexClient:
 
     def _build_environment(self) -> dict[str, str]:
         env = os.environ.copy()
+        if self.isolated:
+            env = {
+                key: value
+                for key, value in env.items()
+                if key in {"PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+            }
+            codex_home = self.workspace / ".codex"
+            codex_home.mkdir(exist_ok=True)
+            (codex_home / "config.toml").write_text(
+                'default_permissions = "patent-task"\n'
+                "[permissions.patent-task.filesystem]\n"
+                '":root" = "deny"\n":minimal" = "read"\n'
+                f'{json.dumps(str(self.workspace))} = "write"\n'
+                "[permissions.patent-task.network]\nenabled = false\n",
+                encoding="utf-8",
+            )
+            env.update(HOME=str(self.workspace), CODEX_HOME=str(codex_home))
         if self.settings.gpt_api_key and not env.get("CODEX_API_KEY"):
             env["CODEX_API_KEY"] = self.settings.gpt_api_key
         return env
@@ -230,31 +254,30 @@ def build_codex_prompt(
     task_prompt: str,
     visual_attachment_count: int = 0,
 ) -> str:
-    """Wrap the precompiled stage prompt so Codex runs as a text reviewer."""
+    """Explicitly invoke the materialized skill; supply paths, not compiled rules."""
+    name = skill_path.parent.name if skill_path.name == "SKILL.md" else skill_path.stem
+    parts = [
+        f"${name}",
+        f"请调用这个 Skill：{skill_path}。先读取 SKILL.md，再按其中链接读取当前阶段规则。",
+        "使用文件工具读取任务给出的原文件；PDF 必要时渲染后查看图像。中间文件写入当前工作目录。",
+        "只处理本次材料，不修改原文件。报告明确标注未能读取或核对的范围。",
+    ]
+    if visual_attachment_count:
+        parts.append(f"本次还附加 {visual_attachment_count} 张图片附件。")
+    parts.extend(["<task>", task_prompt, "</task>"])
+    return "\n\n".join(parts)
 
-    task_mode = "本次任务是专利审查任务，不是代码修改任务。"
-    file_instruction = "不要读取文件，不要运行 shell 命令，不要检查仓库，不要输出执行计划。"
-    if visual_attachment_count > 0:
-        task_mode = (
-            f"本次任务是专利审查任务，不是代码修改任务；"
-            f"后端已通过 Codex CLI 附加 {visual_attachment_count} 张图片附件，"
-            "图片属于本阶段审查材料。"
-        )
-        file_instruction = (
-            "除已附加的图片附件外，不要读取文件，不要运行 shell 命令，"
-            "不要检查仓库，不要输出执行计划。"
-        )
-    return "\n\n".join(
-        [
-            task_mode,
-            "后端已经确认配置的专利审查 skill 存在，并已把本阶段所需规则和材料编译到 <task> 中。",
-            file_instruction,
-            "直接依据 <task> 内容完成审查，并只在最终回答中输出本阶段 Markdown 审查结果。",
-            "<task>",
-            task_prompt,
-            "</task>",
-        ]
-    )
+
+def stop_process_group(process: Any) -> None:
+    """Reap the CLI and its file-tool children on timeout or cancellation."""
+    if isinstance(process, subprocess.Popen):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    else:
+        process.kill()
 
 
 def parse_codex_event(stage: str, line: str) -> tuple[CodexEvent | None, str | None, str | None]:

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -32,6 +32,15 @@ class PatentCheckTask(Base):
     )
     title: Mapped[str] = mapped_column(String(255), default="未命名审查任务", nullable=False)
     technical_field: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    skill_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def skill_name(self) -> str | None:
+        return (self.skill_snapshot or {}).get("display_name")
+
+    @property
+    def skill_version(self) -> int | None:
+        return (self.skill_snapshot or {}).get("version")
 
     claims_text_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     specification_text_length: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

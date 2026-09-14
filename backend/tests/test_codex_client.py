@@ -71,7 +71,7 @@ def test_codex_client_emits_events_and_extracts_final_message(tmp_path: Path) ->
     ]
     assert captured_events[2].content == "# 阶段报告\n- 发现问题"
     assert captured_events[0].message == "第一阶段审查已启动。"
-    assert "check-patent.md" not in process.stdin_payload
+    assert "check-patent.md" in process.stdin_payload
     assert "请检查权利要求书。" in process.stdin_payload
     assert process.args is not None
     assert "--json" in process.args
@@ -79,15 +79,16 @@ def test_codex_client_emits_events_and_extracts_final_message(tmp_path: Path) ->
     assert "--skip-git-repo-check" in process.args
 
 
-def test_build_codex_prompt_uses_compiled_task_without_skill_file_path(tmp_path: Path) -> None:
+def test_build_codex_prompt_invokes_skill_by_name_and_path(tmp_path: Path) -> None:
     skill = tmp_path / "check-patent.md"
     skill.write_text("完整 skill 内容，不应被重复发送。", encoding="utf-8")
 
     prompt = build_codex_prompt(skill, "【system】\n只执行第一阶段。")
 
     assert "完整 skill 内容" not in prompt
-    assert str(skill) not in prompt
-    assert "不要读取文件" in prompt
+    assert str(skill) in prompt
+    assert "$check-patent" in prompt
+    assert "使用文件工具读取" in prompt
     assert "只执行第一阶段" in prompt
 
 
@@ -379,3 +380,24 @@ def test_codex_client_maps_nonzero_exit_to_user_facing_error(tmp_path: Path) -> 
 
     with pytest.raises(UserFacingError, match="Codex 执行失败"):
         client.run(stage="stage_one", prompt="请审查。", on_event=lambda event: None)
+
+
+def test_task_environment_excludes_application_credentials(tmp_path, monkeypatch):
+    import tomllib
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://private-database")
+    monkeypatch.setenv("APP_SECRET_KEY", "private-app-secret")
+    monkeypatch.setenv("CODEX_API_KEY", "unrelated-inherited-key")
+    client = CodexClient(
+        Settings(gpt_api_key="configured-model-key"), workspace=tmp_path, isolated=True
+    )
+    env = client._build_environment()
+    assert "DATABASE_URL" not in env and "APP_SECRET_KEY" not in env
+    assert env["CODEX_API_KEY"] == "configured-model-key"
+    assert env["HOME"] == str(tmp_path)
+    config = tomllib.loads((tmp_path / ".codex/config.toml").read_text())
+    policy = config["permissions"][config["default_permissions"]]
+    assert policy["filesystem"][":root"] == "deny"
+    assert policy["filesystem"][str(tmp_path)] == "write"
+    assert policy["network"]["enabled"] is False
+    assert "--sandbox" not in client._build_command()

@@ -1,106 +1,41 @@
-"""这个文件用于验证 Worker 构造的模型提示词不会携带无关阶段内容。"""
+"""原文件及完整 Skill 快照传递契约。"""
 
-from app.worker import (
-    build_stage_one_messages,
-    build_stage_two_messages,
-    extract_stage_one_bridge,
-)
+from pathlib import Path
 
-PROMPT = """
-# 专利权利要求书与说明书检查
-
-## 第一阶段：权利要求书检查与特征分解
-第一阶段规则正文。
-
-## 第二阶段：说明书检查
-第二阶段规则正文。
-
-## 三、说明书附图检查清单
-附图规则正文。
-
-## 四、说明书摘要检查清单
-摘要规则正文。
-
-## 五、输出格式
-输出格式正文。
-
-## 严重程度定义
-严重程度正文。
-
-## 工作指令
-工作指令正文。
-"""
-PROMPT = PROMPT + "\n".join(f"无关长规则{i}。" for i in range(200))
+from app.models.patent_check_file import PatentCheckFile
+from app.models.patent_check_task import PatentCheckTask
+from app.services.skill_service import builtin_skill_files, materialize_skill
+from app.worker import build_file_review_prompt, prepare_original_files
 
 
-def test_stage_one_prompt_excludes_later_stage_rules() -> None:
-    messages = build_stage_one_messages(PROMPT, {"claims": "权利要求文本"}, "人工智能")
-    system_content = messages[0]["content"]
-
-    assert "第一阶段规则正文" in system_content
-    assert "输出格式正文" in system_content
-    assert "严重程度正文" in system_content
-    assert "第二阶段规则正文" not in system_content
-    assert "附图规则正文" not in system_content
-    assert len(system_content) < len(PROMPT)
+def test_stage_prompts_pass_paths_without_compiling_document_text():
+    files = {"claims": "inputs/claims.pdf", "specification": "inputs/specification.docx"}
+    one = build_file_review_prompt("stage_one", files, "机械")
+    two = build_file_review_prompt("stage_two", files, "机械")
+    assert "inputs/claims.pdf" in one
+    assert "specification.docx" not in one
+    assert "inputs/claims.pdf" in two and "inputs/specification.docx" in two
+    assert "stage-one.md" in two
 
 
-def test_stage_two_prompt_excludes_stage_one_rules() -> None:
-    messages = build_stage_two_messages(
-        PROMPT,
-        {"specification": "说明书文本", "drawings": "", "abstract": ""},
-        "人工智能",
-        "### 技术特征分解与需说明书解释项清单\n| 权利要求编号 | 技术特征 |\n|---|---|\n| 权1 | A |",
+def test_original_bytes_and_skill_references_are_available_to_codex(tmp_path):
+    upload = tmp_path / "scan.pdf"
+    data = b"%PDF-1.4 image-only fixture\x00\xff"
+    upload.write_bytes(data)
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    task = PatentCheckTask(
+        files=[
+            PatentCheckFile(file_role=role, stored_path=str(upload))
+            for role in ("claims", "specification")
+        ]
     )
-    system_content = messages[0]["content"]
-
-    assert "第二阶段规则正文" in system_content
-    assert "附图规则正文" in system_content
-    assert "摘要规则正文" in system_content
-    assert "输出格式正文" in system_content
-    assert "第一阶段规则正文" not in system_content
-    assert len(system_content) < len(PROMPT)
-
-
-def test_stage_two_uses_bridge_section_instead_of_full_stage_one_report() -> None:
-    stage_one_result = """
-# 专利文件检查报告
-
-### 问题项（按严重程度排序）
-这里是一大段第一阶段问题解释，不应整体传入第二阶段。
-
-### 技术特征分解与需说明书解释项清单
-| 权利要求编号 | 技术特征摘录 | 需说明书解释的内容 |
-|---|---|---|
-| 权1 | A | 解释A |
-
-## 第二阶段：说明书检查
-后续内容。
-"""
-
-    bridge = extract_stage_one_bridge(stage_one_result)
-    messages = build_stage_two_messages(
-        PROMPT,
-        {"specification": "说明书文本", "drawings": "", "abstract": ""},
-        "人工智能",
-        stage_one_result,
-    )
-    user_content = messages[1]["content"]
-
-    assert "解释A" in bridge
-    assert "这里是一大段第一阶段问题解释" not in user_content
-    assert "解释A" in user_content
-
-
-def test_stage_two_prompt_mentions_visual_attachments_when_present() -> None:
-    messages = build_stage_two_messages(
-        PROMPT,
-        {"specification": "说明书文本", "drawings": "", "abstract": ""},
-        "人工智能",
-        "### 技术特征分解与需说明书解释项清单\n| 权1 | A |",
-        visual_attachment_count=2,
-    )
-    user_content = messages[1]["content"]
-
-    assert "附加了 2 张实际图像" in user_content
-    assert "图1" in user_content
+    paths = prepare_original_files(task, workspace)
+    assert (workspace / paths["claims"]).read_bytes() == data
+    assert (workspace / paths["specification"]).read_bytes() == data
+    assert len(list((workspace / "inputs").iterdir())) == 2
+    files = builtin_skill_files()
+    entry = materialize_skill({"files": files}, workspace)
+    assert entry.relative_to(workspace) == Path(".agents/skills/check-patent/SKILL.md")
+    for relative, content in files.items():
+        assert (entry.parent / relative).read_text() == content

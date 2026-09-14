@@ -5,11 +5,10 @@ from app.core.config import Settings
 
 
 def test_settings_exposes_file_limits() -> None:
-    settings = Settings(max_file_size_mb=20, max_task_files=4, max_total_text_chars=200000)
+    settings = Settings(max_file_size_mb=20, max_task_files=4)
 
     assert settings.max_file_size_bytes == 20 * 1024 * 1024
     assert settings.max_task_files == 4
-    assert settings.max_total_text_chars == 200000
 
 
 def test_settings_reads_codex_environment(monkeypatch) -> None:

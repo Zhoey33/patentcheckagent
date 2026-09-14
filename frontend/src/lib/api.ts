@@ -24,8 +24,9 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ detail: "请求失败" }));
-    throw new ApiError(payload.detail || "请求失败", response.status);
+    throw new ApiError(typeof payload.detail === "string" ? payload.detail : "填写内容格式有误，请检查后重试。", response.status);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 

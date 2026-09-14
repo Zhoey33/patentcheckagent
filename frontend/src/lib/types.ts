@@ -30,6 +30,8 @@ export type PatentCheckTask = {
   title: string;
   technical_field: string | null;
   status: string;
+  skill_name: string | null;
+  skill_version: number | null;
   claims_text_length: number;
   specification_text_length: number;
   drawings_text_length: number;
@@ -86,3 +88,16 @@ export type PatentCheckTaskStatus = {
   progress_steps: PatentCheckProgressStep[];
   error_message: string | null;
 };
+
+export type ReviewSkill = {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  version: number;
+  is_enabled: boolean;
+  is_default: boolean;
+  updated_at: string;
+};
+
+export type ReviewSkillDetail = ReviewSkill & { files: Record<string, string> };

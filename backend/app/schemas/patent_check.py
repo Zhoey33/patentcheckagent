@@ -29,6 +29,8 @@ class PatentCheckTaskRead(BaseModel):
     id: str
     title: str
     technical_field: str | None
+    skill_name: str | None = None
+    skill_version: int | None = None
     status: str
     claims_text_length: int
     specification_text_length: int

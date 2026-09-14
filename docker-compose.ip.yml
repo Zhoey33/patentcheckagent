@@ -1,0 +1,60 @@
+# 无域名部署：通过公网 IP 和 Let's Encrypt IP 证书提供 HTTPS。
+x-runtime: &runtime
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *runtime
+
+  redis:
+    <<: *runtime
+
+  backend:
+    <<: *runtime
+    image: patent-check-backend:local
+    build:
+      args:
+        DEBIAN_MIRROR: https://deb.debian.org
+        PIP_INDEX_URL: https://pypi.org/simple
+        CODEX_NPM_REGISTRY: https://registry.npmjs.org
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
+
+  worker:
+    <<: *runtime
+    image: patent-check-backend:local
+    build: !reset null
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    <<: *runtime
+    build:
+      args:
+        NPM_REGISTRY: https://registry.npmjs.org
+    ports: !override
+      - "127.0.0.1:3000:3000"
+
+  nginx:
+    <<: *runtime
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP:?Set PUBLIC_IP in .env}
+    volumes: !override
+      - ./deploy/nginx/ip.https.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/patent-check-certbot:/var/www/certbot:ro
+    ports: !override
+      - "80:80"
+      - "443:443"

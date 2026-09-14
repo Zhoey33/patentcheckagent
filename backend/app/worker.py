@@ -2,7 +2,7 @@
 
 import json
 import logging
-import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,30 +18,9 @@ from app.models.patent_check_event import PatentCheckEvent
 from app.models.patent_check_task import PROGRESS_STAGE_DEFAULTS, PatentCheckTask
 from app.services.codex_client import CodexClient, CodexEvent, CodexRunResult
 from app.services.errors import UserFacingError
-from app.services.prompt_loader import load_check_patent_prompt
-from app.services.visual_attachment_extractor import collect_visual_attachments
+from app.services.skill_service import materialize_skill, snapshot_skill
 
 logger = logging.getLogger(__name__)
-
-STAGE_ONE_OUTPUT_INSTRUCTION = """
-输出要求：
-- 只输出第一阶段内容，不要输出说明书检查、附图检查或摘要检查。
-- 使用清晰 Markdown 结构，至少包含：
-  “### 审查结论”“### 主要问题”“### 技术特征分解与需说明书解释项清单”。
-- 问题项按严重程度排序，优先列出最关键的 8 项以内。
-- 《技术特征分解与需说明书解释项清单》应聚焦第二阶段必须核对的关键技术特征，原则上不超过 20 行。
-- 每个问题的建议修改保持可执行，但避免展开模板中的全部检查清单。
-""".strip()
-
-STAGE_TWO_OUTPUT_INSTRUCTION = """
-输出要求：
-- 只输出第二阶段、附图与摘要检查、总体评价。
-- 使用清晰 Markdown 结构，至少包含：
-  “### 审查结论”“### 权要特征-说明书解释对应检查表”“### 主要问题”“### 总体评价”。
-- 必须包含“权要特征-说明书解释对应检查表”。
-- 问题项按严重程度排序，优先列出最关键的 10 项以内。
-- 不要重复第一阶段完整报告，只引用需说明书解释项清单中的必要特征。
-""".strip()
 
 
 class TaskCancelledError(Exception):
@@ -74,58 +53,37 @@ def run_patent_check_task(task_id: str) -> None:
 
         try:
             ensure_task_not_cancelled(db, task)
-            payload = load_process_text(task)
-            prompt = load_check_patent_prompt()
-            client = CodexClient(settings, workspace=Path.cwd())
-
-            ensure_task_not_cancelled(db, task)
-            set_task_progress(task, "stage_one", "正在执行第一阶段：权利要求书检查与特征分解。")
-            db.commit()
-            stage_one = call_and_log(
-                db=db,
-                task=task,
-                client=client,
-                stage="stage_one",
-                prompt=format_messages_for_codex(
-                    build_stage_one_messages(prompt, payload, task.technical_field)
-                ),
-            )
-            ensure_task_not_cancelled(db, task)
-            task.stage_one_result = stage_one.content
-            set_task_progress(
-                task,
-                "stage_two",
-                "第一阶段完成，正在执行第二阶段：说明书、附图与摘要检查。",
-            )
-            db.commit()
-            logger.info(
-                "patent_task_stage_completed task_id=%s stage=stage_one output_chars=%s",
-                task.id,
-                len(stage_one.content),
-            )
-
             settings.upload_dir.mkdir(parents=True, exist_ok=True)
             with TemporaryDirectory(
-                prefix=f"task-visuals-{task.id}-",
-                dir=settings.upload_dir,
-            ) as visual_dir:
+                prefix=f"task-work-{task.id}-", dir=settings.upload_dir
+            ) as work:
+                workspace = Path(work).resolve()
+                skill = task.skill_snapshot or snapshot_skill(db, None)
+                skill_path = materialize_skill(skill, workspace)
+                file_paths = prepare_original_files(task, workspace)
+                client_settings = settings.model_copy(update={"codex_skill_path": skill_path})
+                client = CodexClient(client_settings, workspace=workspace, isolated=True)
+
+                set_task_progress(task, "stage_one", "正在读取权利要求原文件并执行所选 Skill。")
+                db.commit()
+                stage_one = call_and_log(
+                    db,
+                    task,
+                    client,
+                    "stage_one",
+                    build_file_review_prompt("stage_one", file_paths, task.technical_field),
+                )
                 ensure_task_not_cancelled(db, task)
-                image_paths = collect_visual_attachments(task.files, Path(visual_dir))
+                task.stage_one_result = stage_one.content
+                (workspace / "stage-one.md").write_text(stage_one.content, encoding="utf-8")
+                set_task_progress(task, "stage_two", "正在按 Skill 核对说明书、附图和摘要原文件。")
+                db.commit()
                 stage_two = call_and_log(
-                    db=db,
-                    task=task,
-                    client=client,
-                    stage="stage_two",
-                    prompt=format_messages_for_codex(
-                        build_stage_two_messages(
-                            prompt,
-                            payload,
-                            task.technical_field,
-                            stage_one.content,
-                            visual_attachment_count=len(image_paths),
-                        )
-                    ),
-                    image_paths=image_paths,
+                    db,
+                    task,
+                    client,
+                    "stage_two",
+                    build_file_review_prompt("stage_two", file_paths, task.technical_field),
                 )
 
             ensure_task_not_cancelled(db, task)
@@ -181,181 +139,47 @@ def run_patent_check_task(task_id: str) -> None:
             cleanup_task_inputs(db, task)
 
 
-def load_process_text(task: PatentCheckTask) -> dict[str, str]:
-    """Load extracted texts persisted when the task was created."""
-
-    if not task.process_text_path:
-        raise UserFacingError("任务过程文本已清理，无法重试，请重新提交文件。")
-    path = Path(task.process_text_path)
-    if not path.exists():
-        raise UserFacingError("任务过程文本不存在，无法执行审查，请重新提交文件。")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def build_stage_one_messages(
-    prompt: str, payload: dict[str, str], technical_field: str | None
-) -> list[dict[str, str]]:
-    """Build model messages for claims checking and feature decomposition."""
-
-    stage_prompt = build_stage_prompt(prompt, "stage_one")
-    return [
-        {"role": "system", "content": stage_prompt},
-        {
-            "role": "user",
-            "content": "\n".join(
-                [
-                    "请仅执行第一阶段：权利要求书检查与特征分解。",
-                    f"技术领域：{technical_field or '未填写'}",
-                    "请输出通过项、问题项，以及《技术特征分解与需说明书解释项清单》。",
-                    STAGE_ONE_OUTPUT_INSTRUCTION,
-                    "【权利要求书】",
-                    payload.get("claims", ""),
-                ]
-            ),
-        },
-    ]
+def prepare_original_files(task: PatentCheckTask, workspace: Path) -> dict[str, str]:
+    """Copy only this task's original uploads into its Codex workspace."""
+    paths = {}
+    inputs = workspace / "inputs"
+    inputs.mkdir()
+    for file in task.files:
+        if not file.stored_path or not Path(file.stored_path).is_file():
+            raise UserFacingError("任务原文件已清理或不存在，请重新上传。")
+        source = Path(file.stored_path)
+        target = inputs / f"{file.file_role}{source.suffix.lower()}"
+        shutil.copyfile(source, target)
+        target.chmod(0o444)
+        paths[file.file_role] = str(target.relative_to(workspace))
+    if not {"claims", "specification"} <= paths.keys():
+        raise UserFacingError("任务缺少权利要求书或说明书原文件，请重新上传。")
+    return paths
 
 
-def build_stage_two_messages(
-    prompt: str,
-    payload: dict[str, str],
-    technical_field: str | None,
-    stage_one_result: str,
-    visual_attachment_count: int = 0,
-) -> list[dict[str, str]]:
-    """Build model messages for specification, drawings and abstract checking."""
-
-    stage_prompt = build_stage_prompt(prompt, "stage_two")
-    stage_one_bridge = extract_stage_one_bridge(stage_one_result)
-    visual_note = build_visual_attachment_note(visual_attachment_count)
-    return [
-        {"role": "system", "content": stage_prompt},
-        {
-            "role": "user",
-            "content": "\n".join(
-                [
-                    "请执行第二阶段：说明书、附图说明和摘要检查。",
-                    f"技术领域：{technical_field or '未填写'}",
-                    "必须基于第一阶段的需说明书解释项清单逐项检查说明书支持情况。",
-                    visual_note,
-                    "【第一阶段结果】",
-                    stage_one_bridge,
-                    STAGE_TWO_OUTPUT_INSTRUCTION,
-                    "【说明书】",
-                    payload.get("specification", ""),
-                    "【附图说明】",
-                    payload.get("drawings", ""),
-                    "【摘要】",
-                    payload.get("abstract", "未提供摘要文件。"),
-                ]
-            ),
-        },
-    ]
-
-
-def build_visual_attachment_note(count: int) -> str:
-    """Build a user prompt note describing attached drawing images."""
-
-    if count <= 0:
-        return "本次未附加实际图像；如需核对图面内容，只能依据附图说明文字判断。"
-    return (
-        f"本次随 Codex 调用附加了 {count} 张实际图像，"
-        "请结合这些图像核对图1等附图内容、附图标记和说明书文字是否一致。"
-    )
-
-
-def build_stage_prompt(prompt: str, stage: str) -> str:
-    """Build a compact prompt containing only rules relevant to one review stage."""
-
-    common = "\n\n".join(
-        part
-        for part in [
-            extract_intro(prompt),
-            extract_named_section(prompt, "## 五、输出格式", "## 严重程度定义"),
-            extract_named_section(prompt, "## 严重程度定义", "## 工作指令"),
-        ]
-        if part
-    )
+def build_file_review_prompt(stage: str, files: dict[str, str], technical_field: str | None) -> str:
+    roles = {
+        "claims": "权利要求书",
+        "specification": "说明书",
+        "drawings": "附图",
+        "abstract": "摘要",
+    }
+    lines = [f"技术领域：{technical_field or '未填写'}"]
     if stage == "stage_one":
-        stage_rules = extract_named_section(prompt, "## 第一阶段", "## 第二阶段")
-        return "\n\n".join(
-            [
-                common,
-                stage_rules,
-                STAGE_ONE_OUTPUT_INSTRUCTION,
-            ]
-        ).strip()
-    if stage == "stage_two":
-        stage_rules = "\n\n".join(
-            part
-            for part in [
-                extract_named_section(prompt, "## 第二阶段", "## 三、说明书附图检查清单"),
-                extract_named_section(
-                    prompt,
-                    "## 三、说明书附图检查清单",
-                    "## 四、说明书摘要检查清单",
-                ),
-                extract_named_section(prompt, "## 四、说明书摘要检查清单", "## 五、输出格式"),
-            ]
-            if part
+        lines.append("仅执行 Skill 的第一阶段：权利要求书检查与特征分解。")
+        selected = {"claims": files["claims"]}
+    else:
+        lines.append(
+            "执行 Skill 的第二阶段：说明书、附图与摘要检查。"
+            "先读取 stage-one.md 中的第一阶段报告，沿用技术特征编号。"
         )
-        return "\n\n".join(
-            [
-                common,
-                stage_rules,
-                STAGE_TWO_OUTPUT_INSTRUCTION,
-            ]
-        ).strip()
-    raise ValueError(f"Unknown stage: {stage}")
-
-
-def extract_intro(prompt: str) -> str:
-    """Extract the shared role and goal from the full patent-check prompt."""
-
-    return prompt.split("## 第一阶段", 1)[0].strip()
-
-
-def extract_named_section(prompt: str, start_marker: str, end_marker: str) -> str:
-    """Extract one Markdown section by start and end markers."""
-
-    start = prompt.find(start_marker)
-    if start == -1:
-        return ""
-    end = prompt.find(end_marker, start + len(start_marker))
-    if end == -1:
-        return prompt[start:].strip()
-    return prompt[start:end].strip()
-
-
-def extract_stage_one_bridge(stage_one_result: str, max_chars: int = 12_000) -> str:
-    """Extract the feature-explanation checklist needed by the second stage."""
-
-    lines = stage_one_result.splitlines()
-    start_index = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if "技术特征分解与需说明书解释项清单" in line
-        ),
-        None,
+        selected = files
+    lines.append("以下为原文件路径，请自行调用文件工具读取；上传阶段没有提取文字或转换页面：")
+    lines.extend(f"- {roles[role]}：{path}" for role, path in selected.items())
+    lines.append(
+        "按 Skill 输出本阶段 Markdown 报告，首行使用对应阶段的 # 标题。正文不包含执行计划。"
     )
-    if start_index is None:
-        return truncate_text(stage_one_result, max_chars)
-
-    selected: list[str] = []
-    for line in lines[start_index:]:
-        if selected and re.match(r"^##\s+", line):
-            break
-        selected.append(line)
-    return truncate_text("\n".join(selected).strip(), max_chars)
-
-
-def truncate_text(text: str, max_chars: int) -> str:
-    """Limit text passed between model stages while preserving a clear marker."""
-
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n\n[内容过长，已截断]"
+    return "\n".join(lines)
 
 
 def set_task_progress(task: PatentCheckTask, stage: str, message: str) -> None:
@@ -553,19 +377,19 @@ def first_content_line(markdown: str) -> str:
 
 
 def cleanup_task_inputs(db, task: PatentCheckTask) -> None:
-    """Delete raw uploads and keep retry input only when a failed task can retry."""
-
-    for file in task.files:
-        if file.stored_path:
-            Path(file.stored_path).unlink(missing_ok=True)
-            file.stored_path = None
-
-    process_text_path = Path(task.process_text_path) if task.process_text_path else None
-    if task.status == "failed" and process_text_path and process_text_path.exists():
+    """Keep failed-task original inputs for retry; clean completed/cancelled inputs."""
+    available = bool(task.files) and all(
+        file.stored_path and Path(file.stored_path).is_file() for file in task.files
+    )
+    if task.status == "failed" and available:
         task.input_cleanup_status = "retryable"
     else:
-        if process_text_path:
-            process_text_path.unlink(missing_ok=True)
-            task.process_text_path = None
+        for file in task.files:
+            if file.stored_path:
+                Path(file.stored_path).unlink(missing_ok=True)
+                file.stored_path = None
         task.input_cleanup_status = "cleaned"
+    if task.process_text_path:
+        Path(task.process_text_path).unlink(missing_ok=True)
+        task.process_text_path = None
     db.commit()

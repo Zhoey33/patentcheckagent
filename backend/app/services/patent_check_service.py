@@ -1,6 +1,5 @@
 """这个文件用于编排专利审查任务创建、权限校验和队列投递。"""
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -15,12 +14,11 @@ from app.core.config import Settings
 from app.models.patent_check_file import PatentCheckFile
 from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
-from app.services.document_extractor import (
-    SUPPORTED_FORMAT_LABEL,
-    SUPPORTED_SUFFIXES,
-    extract_document_text,
-)
 from app.services.errors import UserFacingError
+from app.services.skill_service import snapshot_skill
+
+SUPPORTED_SUFFIXES = {".pdf", ".docx"}
+SUPPORTED_FORMAT_LABEL = "PDF 或 Word（.docx）"
 
 FILE_ROLES = {
     "claims": "权利要求书文件",
@@ -114,8 +112,9 @@ def create_patent_check_task(
     title: str | None,
     technical_field: str | None,
     uploads: dict[str, UploadFile | None],
+    skill_id: str | None = None,
 ) -> PatentCheckTask:
-    """Create a task after validating files and extracting text."""
+    """Save original files and the selected skill snapshot without parsing documents."""
 
     required_roles = ("claims", "specification")
     for role in required_roles:
@@ -126,7 +125,7 @@ def create_patent_check_task(
     if len(provided) > settings.max_task_files:
         raise UserFacingError(f"单个任务最多上传 {settings.max_task_files} 个文件。")
 
-    extracted_texts: dict[str, str] = {}
+    skill = snapshot_skill(db, skill_id)
     files: list[PatentCheckFile] = []
     stored_paths: list[Path] = []
     try:
@@ -135,17 +134,6 @@ def create_patent_check_task(
             content = ensure_supported_upload(file, settings)
             stored_path = save_upload(content, file.filename or f"{role}.pdf", role, settings)
             stored_paths.append(stored_path)
-            extraction_status = "succeeded"
-            extraction_error = None
-            try:
-                text = extract_document_text(stored_path)
-            except UserFacingError as exc:
-                if not can_accept_visual_only_upload(role, exc):
-                    raise
-                text = ""
-                extraction_status = "text_unavailable"
-                extraction_error = exc.message
-            extracted_texts[role] = text
             files.append(
                 PatentCheckFile(
                     file_role=role,
@@ -153,24 +141,11 @@ def create_patent_check_task(
                     stored_path=str(stored_path),
                     content_type=file.content_type,
                     file_size_bytes=len(content),
-                    extracted_text_length=len(text),
-                    extraction_status=extraction_status,
-                    extraction_error=extraction_error,
+                    extracted_text_length=0,
+                    extraction_status="original",
+                    extraction_error=None,
                 )
             )
-
-        total_chars = sum(len(text) for text in extracted_texts.values())
-        if total_chars > settings.max_total_text_chars:
-            raise UserFacingError(
-                f"单个任务总输入文本超过 {settings.max_total_text_chars} 个字符限制。"
-            )
-
-        settings.upload_dir.mkdir(parents=True, exist_ok=True)
-        process_text_path = settings.upload_dir / f"task-input-{uuid4()}.json"
-        process_text_path.write_text(
-            json.dumps(extracted_texts, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
         task = PatentCheckTask(
             user_id=user.id,
@@ -178,11 +153,7 @@ def create_patent_check_task(
             technical_field=(
                 technical_field.strip() if technical_field and technical_field.strip() else None
             ),
-            claims_text_length=len(extracted_texts.get("claims", "")),
-            specification_text_length=len(extracted_texts.get("specification", "")),
-            drawings_text_length=len(extracted_texts.get("drawings", "")),
-            abstract_text_length=len(extracted_texts.get("abstract", "")),
-            process_text_path=str(process_text_path),
+            skill_snapshot=skill,
             files=files,
         )
         db.add(task)
@@ -194,14 +165,6 @@ def create_patent_check_task(
         for path in stored_paths:
             path.unlink(missing_ok=True)
         raise
-
-
-def can_accept_visual_only_upload(role: str, error: UserFacingError) -> bool:
-    """Return whether a visual-only optional upload may continue without text."""
-
-    if role != "drawings":
-        return False
-    return "未能抽取到" in error.message
 
 
 def get_task_for_user(db: Session, task_id: str, user: User) -> PatentCheckTask:

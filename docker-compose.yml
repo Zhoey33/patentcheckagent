@@ -54,6 +54,8 @@ services:
       - "8000:8000"
 
   worker:
+    security_opt:
+      - seccomp=./deploy/codex-seccomp.json
     build:
       context: .
       dockerfile: backend/Dockerfile

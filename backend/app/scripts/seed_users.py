@@ -8,6 +8,7 @@ from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.user import User
+from app.services.skill_service import ensure_default_skill
 
 
 def upsert_user(username: str, password: str, role: str) -> None:
@@ -29,6 +30,8 @@ def main() -> None:
     """Seed one admin and two regular internal users."""
 
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        ensure_default_skill(db)
     upsert_user(
         os.getenv("SEED_ADMIN_USERNAME", "admin"),
         os.getenv("SEED_ADMIN_PASSWORD", "ChangeMeAdmin123!"),

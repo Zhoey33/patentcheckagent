@@ -23,7 +23,6 @@ from app.models.patent_check_task import PatentCheckTask
 from app.models.user import User
 from app.scripts.recover_stale_tasks import recover_stale_running_tasks
 from app.services.codex_client import CodexEvent, CodexRunResult
-from app.services.errors import UserFacingError
 from app.services.patent_check_service import create_patent_check_task
 from app.worker import (
     call_and_log,
@@ -102,10 +101,6 @@ def test_create_task_rejects_non_pdf(client: TestClient) -> None:
 
 
 def test_create_task_saves_metadata(monkeypatch, client: TestClient) -> None:
-    monkeypatch.setattr(
-        "app.services.patent_check_service.extract_document_text",
-        lambda path: f"抽取文本 {path.name}",
-    )
     login(client)
 
     response = client.post(
@@ -127,10 +122,6 @@ def test_create_task_saves_metadata(monkeypatch, client: TestClient) -> None:
 
 
 def test_create_task_accepts_docx_uploads(monkeypatch, client: TestClient) -> None:
-    monkeypatch.setattr(
-        "app.services.patent_check_service.extract_document_text",
-        lambda path: f"抽取文本 {path.name}",
-    )
     login(client)
 
     response = client.post(
@@ -150,10 +141,6 @@ def test_create_task_accepts_docx_uploads(monkeypatch, client: TestClient) -> No
 
 
 def test_create_task_treats_drawings_as_optional(monkeypatch, client: TestClient) -> None:
-    monkeypatch.setattr(
-        "app.services.patent_check_service.extract_document_text",
-        lambda path: f"抽取文本 {path.name}",
-    )
     login(client)
 
     response = client.post(
@@ -171,15 +158,7 @@ def test_create_task_treats_drawings_as_optional(monkeypatch, client: TestClient
     assert len(payload["files"]) == 2
 
 
-def test_create_task_accepts_visual_only_drawings_upload(
-    monkeypatch, client: TestClient
-) -> None:
-    def fake_extract(path):
-        if path.name.startswith("drawings-"):
-            raise UserFacingError("未能抽取到可复制文本，请上传可复制文本型 PDF。")
-        return f"抽取文本 {path.name}"
-
-    monkeypatch.setattr("app.services.patent_check_service.extract_document_text", fake_extract)
+def test_create_task_accepts_visual_only_drawings_upload(monkeypatch, client: TestClient) -> None:
     login(client)
 
     response = client.post(
@@ -196,17 +175,13 @@ def test_create_task_accepts_visual_only_drawings_upload(
     payload = response.json()
     drawing_file = next(file for file in payload["files"] if file["file_role"] == "drawings")
     assert payload["drawings_text_length"] == 0
-    assert drawing_file["extraction_status"] == "text_unavailable"
-    assert "未能抽取到" in drawing_file["extraction_error"]
+    assert drawing_file["extraction_status"] == "original"
+    assert drawing_file["extraction_error"] is None
 
 
 def test_create_task_ignores_empty_optional_file_inputs_from_browser(
     monkeypatch, client: TestClient
 ) -> None:
-    monkeypatch.setattr(
-        "app.services.patent_check_service.extract_document_text",
-        lambda path: f"抽取文本 {path.name}",
-    )
     login(client)
 
     response = client.post(
@@ -230,10 +205,6 @@ def test_create_task_ignores_empty_optional_file_inputs_from_browser(
 def test_create_task_service_ignores_browser_empty_optional_uploads(
     monkeypatch, db_session: Session
 ) -> None:
-    monkeypatch.setattr(
-        "app.services.patent_check_service.extract_document_text",
-        lambda path: f"抽取文本 {path.name}",
-    )
     user = db_session.scalar(select(User).where(User.username == "alice"))
     assert user is not None
 
@@ -256,9 +227,7 @@ def test_create_task_service_ignores_browser_empty_optional_uploads(
     assert len(task.files) == 2
 
 
-def test_regular_user_cannot_read_other_users_task(
-    client: TestClient, db_session: Session
-) -> None:
+def test_regular_user_cannot_read_other_users_task(client: TestClient, db_session: Session) -> None:
     alice = db_session.scalar(select(User).where(User.username == "alice"))
     assert alice is not None
     task = PatentCheckTask(user_id=alice.id, title="alice 的任务")
@@ -567,7 +536,7 @@ def test_persist_codex_event_does_not_overwrite_cancelled_progress(
     assert task.progress_message == "用户已取消审查。"
 
 
-def test_retry_failed_task_requires_available_process_text(
+def test_retry_failed_task_requires_available_original_files(
     client: TestClient, db_session: Session
 ) -> None:
     alice = db_session.scalar(select(User).where(User.username == "alice"))
@@ -604,6 +573,15 @@ def test_retry_failed_task_clears_stale_outputs_and_events(
         user_id=alice.id,
         title="带旧结果的失败任务",
         status="failed",
+        files=[
+            PatentCheckFile(
+                file_role=role,
+                original_filename=f"{role}.pdf",
+                stored_path=str(process_text_path),
+                file_size_bytes=10,
+            )
+            for role in ("claims", "specification")
+        ],
         process_text_path=str(process_text_path),
         input_cleanup_status="retryable",
         progress_stage="stage_two",
@@ -656,12 +634,21 @@ def test_recover_stale_running_tasks_marks_only_expired_tasks_retryable(
     stale_task = PatentCheckTask(
         user_id=alice.id,
         title="过期运行任务",
+        files=[
+            PatentCheckFile(
+                file_role=role,
+                original_filename=f"{role}.pdf",
+                stored_path=str(stale_input),
+                file_size_bytes=10,
+            )
+            for role in ("claims", "specification")
+        ],
         status="running",
         progress_stage="stage_one",
         progress_percent=40,
         progress_message="正在执行第一阶段。",
         process_text_path=str(stale_input),
-        started_at=now - timedelta(seconds=400),
+        started_at=now - timedelta(seconds=700),
     )
     fresh_task = PatentCheckTask(
         user_id=alice.id,
@@ -832,9 +819,7 @@ def test_call_and_log_persists_codex_events(db_session: Session) -> None:
     assert log.status == "succeeded"
 
 
-def test_call_and_log_passes_visual_attachments_to_codex(
-    tmp_path, db_session: Session
-) -> None:
+def test_call_and_log_passes_visual_attachments_to_codex(tmp_path, db_session: Session) -> None:
     class ImageClient:
         settings = type("SettingsStub", (), {"codex_model": "codex-test-model"})()
 

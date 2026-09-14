@@ -5,7 +5,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { LogOut, ScrollText, UploadCloud } from "lucide-react";
+import { BookOpen, LogOut, ScrollText, UploadCloud } from "lucide-react";
 
 import { logout } from "@/lib/api";
 import type { User } from "@/lib/types";
@@ -55,6 +55,11 @@ export function AppShell({ user, children }: AppShellProps) {
               <ScrollText className="h-4 w-4" />
               历史
             </Link>
+            {user?.role === "admin" ? (
+              <Link href="/skills" className="inline-flex h-9 items-center gap-2 rounded border border-line bg-white px-3 text-sm text-ink hover:bg-panel">
+                <BookOpen className="h-4 w-4" />Skills
+              </Link>
+            ) : null}
             <div className="hidden text-sm text-muted sm:block">{user?.username}</div>
             <button
               type="button"

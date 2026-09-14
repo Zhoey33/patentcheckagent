@@ -11,6 +11,7 @@ from app import models  # noqa: F401
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.patent_checks import router as patent_checks_router
+from app.api.skills import router as skills_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.base import Base
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(patent_checks_router)
     app.include_router(admin_router)
+    app.include_router(skills_router)
     return app
 
 

@@ -2,6 +2,7 @@
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,7 +37,10 @@ def recover_stale_running_tasks(
         task.progress_message = message
         task.error_message = message
         task.finished_at = current_time
-        task.input_cleanup_status = "retryable" if task.process_text_path else "cleaned"
+        available = bool(task.files) and all(
+            file.stored_path and Path(file.stored_path).is_file() for file in task.files
+        )
+        task.input_cleanup_status = "retryable" if available else "cleaned"
     if tasks:
         db.commit()
     logger.info("stale_running_tasks_recovered count=%s", len(tasks))

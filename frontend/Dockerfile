@@ -3,9 +3,10 @@
 ARG NODE_BASE_IMAGE=node:22-alpine
 FROM ${NODE_BASE_IMAGE} AS deps
 WORKDIR /app
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY frontend/package.json /app/package.json
 COPY frontend/package-lock.json /app/package-lock.json
-RUN npm config set registry https://registry.npmmirror.com && npm ci
+RUN npm config set registry "${NPM_REGISTRY}" && npm ci
 
 FROM ${NODE_BASE_IMAGE} AS builder
 WORKDIR /app

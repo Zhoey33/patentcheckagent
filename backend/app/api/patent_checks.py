@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -36,6 +37,7 @@ router = APIRouter(prefix="/api/patent-checks", tags=["patent-checks"])
 def create_task(
     title: str | None = Form(default=None),
     technical_field: str | None = Form(default=None),
+    skill_id: str | None = Form(default=None),
     claims: UploadFile = File(...),
     specification: UploadFile = File(...),
     drawings: UploadFile | None = File(default=None),
@@ -52,6 +54,7 @@ def create_task(
         user=current_user,
         title=title,
         technical_field=technical_field,
+        skill_id=skill_id,
         uploads={
             "claims": claims,
             "specification": specification,
@@ -184,7 +187,9 @@ def retry_task(
     task = get_task_for_user(db, task_id, current_user)
     if task.status != "failed":
         return task
-    if not task.process_text_path:
+    if not task.files or not all(
+        file.stored_path and Path(file.stored_path).is_file() for file in task.files
+    ):
         raise UserFacingError("任务输入已按安全策略清理，请重新提交文件后发起审查。")
     task.status = "pending"
     task.progress_stage = "queued"

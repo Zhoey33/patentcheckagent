@@ -23,17 +23,16 @@ class Settings(BaseSettings):
     worker_job_timeout_seconds: int = 1_800
 
     codex_command: str = "codex"
-    codex_skill_path: Path = Path("skills/check-patent.md")
-    codex_timeout_seconds: int = 300
+    codex_skill_path: Path = Path("skills/check-patent/SKILL.md")
+    codex_timeout_seconds: int = 600
     codex_model: str | None = None
-    codex_sandbox_mode: str = "read-only"
+    codex_sandbox_mode: str = "workspace-write"
     gpt_base_url: str | None = None
     gpt_api_key: str | None = None
     gpt_model: str | None = None
 
     max_file_size_mb: int = 20
     max_task_files: int = 4
-    max_total_text_chars: int = 200_000
     upload_dir: Path = Path("uploads")
     enable_worker_queue: bool = True
 

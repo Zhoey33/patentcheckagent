@@ -380,9 +380,9 @@ export default function TaskDetailPage() {
             <div className="mt-1 text-sm text-ink">{task.finished_at ? new Date(task.finished_at).toLocaleString() : "-"}</div>
           </div>
           <div>
-            <div className="text-xs text-muted">文本字数</div>
+            <div className="text-xs text-muted">审查 Skill</div>
             <div className="mt-1 text-sm text-ink">
-              {task.claims_text_length + task.specification_text_length + task.drawings_text_length + task.abstract_text_length}
+              {task.skill_name ? `${task.skill_name} · v${task.skill_version}` : "历史默认规则"}
             </div>
           </div>
         </section>
@@ -470,7 +470,7 @@ export default function TaskDetailPage() {
               <div key={file.id} className="rounded border border-line p-3 text-sm">
                 <div className="font-medium text-ink">{file.original_filename}</div>
                 <div className="mt-1 text-muted">
-                  {file.file_role} · {Math.round(file.file_size_bytes / 1024)} KB · 抽取 {file.extracted_text_length} 字
+                  {file.file_role} · {Math.round(file.file_size_bytes / 1024)} KB · {file.extraction_status === "original" ? "原文件" : `历史文本 ${file.extracted_text_length} 字`}
                 </div>
               </div>
             ))}
