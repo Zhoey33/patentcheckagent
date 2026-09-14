@@ -100,3 +100,11 @@ Worker 所需 seccomp 文件 `deploy/codex-seccomp.json` 必须随 Compose 文�
 - 当前目录可读、相邻任务文件不可读的真实沙箱检查通过；报告及 SSE、其他用户隔离、原文件和工作目录清理均通过。
 - 升级前备份位于 `/opt/patent-check-backups/skills-mbt9K5`；旧镜像保留为 `patent-check-backend:before-skills` 和 `patent-check-frontend:before-skills`。新增表/列兼容旧代码，回滚镜像不需要删除新表。
 - 浏览器自动化创建标签页持续超时，未完成真实浏览器中的交互与视觉验收；本次已完成 API、HTML/静态资源和构建检查。
+
+## 性能优化部署
+
+已部署 `CODEX_REASONING_EFFORT=low`、断点重试、事件读取修正和耗时审计；每阶段时限保持 600 秒。运行镜像增加 `unzip`。默认 Skill 通过管理 API 更新为修订 v3（元数据 2.1.0），已有任务继续使用提交时快照。后端 71 项测试、规则校验及同文件真实两阶段复测通过，测量与限制见 `docs/skill-review.md`。
+
+升级前备份：`/opt/patent-check-backups/performance-jGmHqh`；旧后端镜像：`patent-check-backend:before-performance`。前端未改变。本次未新增数据库迁移，重启后已确认默认规则与发布包一致、运行参数生效及 HTTPS 健康检查正常。
+
+原失败任务 `c2804d4f-5e8e-45d7-bee0-ddd4d6887309` 上线后通过 HTTPS API 原地重试成功：保留 Skill v2 快照及原第一阶段报告，第二阶段实际调用 245.710 秒（输入 446,097、输出 15,969 tokens）。审计日志没有新增第一阶段调用，出现 `stage_reused` 事件；报告 16,629 字符，原第一阶段的 30 个特征编号均在第二阶段出现。任务状态 `succeeded`，成功后原文件和任务工作目录已清理，事件只保留允许的元数据。
