@@ -280,13 +280,26 @@ def persist_codex_event(db, task: PatentCheckTask, event: CodexEvent) -> None:
     """Persist one Codex execution event and surface it as current task progress."""
 
     db.refresh(task)
+    # File tools can return entire documents; retain status metadata and report snapshots only.
+    raw_payload = {
+        key: event.raw_payload[key]
+        for key in ("type", "thread_id", "usage")
+        if key in event.raw_payload
+    }
+    if event.event_type == "report_snapshot":
+        raw_payload["content"] = event.content
+    elif isinstance(event.raw_payload.get("item"), dict):
+        item = event.raw_payload["item"]
+        raw_payload["item"] = {
+            key: item[key] for key in ("id", "type", "status", "exit_code") if key in item
+        }
     db.add(
         PatentCheckEvent(
             task_id=task.id,
             stage=event.stage,
             event_type=event.event_type,
             message=event.message,
-            raw_payload=json.dumps(event.raw_payload, ensure_ascii=False),
+            raw_payload=json.dumps(raw_payload, ensure_ascii=False),
         )
     )
     if event.event_type != "report_snapshot" and task.status != "cancelled":
@@ -298,14 +311,6 @@ def get_codex_model_name(client: CodexClient) -> str:
     """Return a stable model label for Codex audit rows."""
 
     return getattr(client.settings, "codex_model", None) or "codex"
-
-
-def format_messages_for_codex(messages: list[dict[str, str]]) -> str:
-    """Convert chat-style stage messages into a single Codex task prompt."""
-
-    return "\n\n".join(
-        f"【{message['role']}】\n{message['content']}" for message in messages
-    ).strip()
 
 
 def normalize_final_report(stage_one: str, stage_two: str) -> str:

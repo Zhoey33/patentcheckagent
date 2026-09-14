@@ -326,8 +326,10 @@ def describe_codex_event(stage: str, payload: dict[str, Any]) -> str:
         return "模型服务连接不稳定，系统正在自动重试。"
     if item_type == "command_execution":
         if item.get("status") == "in_progress":
-            return "正在准备审查规则和任务材料。"
-        return "审查规则和任务材料准备完成。"
+            return "正在读取审查规则或原始材料。"
+        if item.get("exit_code") not in (None, 0):
+            return "本次文件工具执行未完成，Codex 正在调整读取方式。"
+        return "已完成一次材料读取或核对。"
     if inner_type == "task_complete":
         return stage_messages["completed"]
     if inner_type:

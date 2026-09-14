@@ -181,3 +181,39 @@ def test_worker_runs_original_files_with_skill_and_full_stage_bridge(
     assert calls == ["stage_one", "stage_two"] and "C1-F44" in task.final_report
     assert all(file.stored_path is None for file in task.files)
     assert db_session.scalar(select(ReviewSkill.id))
+
+
+def test_file_tool_outputs_are_not_retained_as_process_text(db_session):
+    import json
+
+    from app.models.patent_check_event import PatentCheckEvent
+    from app.models.user import User
+    from app.services.codex_client import CodexEvent
+    from app.worker import persist_codex_event
+
+    user = db_session.scalar(select(User).where(User.username == "alice"))
+    task = PatentCheckTask(user_id=user.id)
+    db_session.add(task)
+    db_session.commit()
+    persist_codex_event(
+        db_session,
+        task,
+        CodexEvent(
+            stage="stage_one",
+            event_type="item.completed",
+            message="读取完成",
+            raw_payload={
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "command": "read input",
+                    "aggregated_output": "private document content",
+                },
+            },
+        ),
+    )
+    saved = db_session.scalar(select(PatentCheckEvent).where(PatentCheckEvent.task_id == task.id))
+    assert "private document content" not in saved.raw_payload
+    assert json.loads(saved.raw_payload)["item"]["exit_code"] == 0
